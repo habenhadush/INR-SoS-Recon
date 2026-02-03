@@ -51,7 +51,6 @@ def load_mat(filepath):
         # B. Handle Datasets (Dense Arrays)
         elif isinstance(node, h5py.Dataset):
             val = np.array(node)
-            # CAUTION: MATLAB saves dense arrays Transposed. We fix this here.
             if val.ndim >= 2:
                 return val.T
             return val
@@ -59,7 +58,7 @@ def load_mat(filepath):
         return None
     
     with h5py.File(filepath, 'r') as f:
-        # We strip the strange '#refs#' group that MATLAB adds
+        # strip '#refs#'
         data = {k: parse_h5_node(f[k]) for k in f.keys() if k != '#refs#'}
     
     return data
@@ -68,3 +67,59 @@ def load_mat(filepath):
 def clear_cache():
     """Clear the disk cache if needed"""
     memory.clear(warn=False)
+
+def inspect_mat_fileheader(filepath: str):
+    try:
+        with h5py.File(filepath, 'r') as f:
+            print("\n[HDF5 Format Detected]")
+            def print_structure(name, obj):
+                if isinstance(obj, h5py.Dataset):
+                    print(f"  Key: '{name}' | Shape: {obj.shape} | Type: Dataset")
+                elif isinstance(obj, h5py.Group):
+                    print(f"  Key: '{name}' | Type: Group")
+            f.visititems(print_structure)
+    except OSError:
+        print("\n[Scipy Format Detected (v7.2 or older)]")
+        try:
+            data = scipy.io.loadmat(filepath)
+            for key, val in data.items():
+                if not key.startswith('__'):
+                    if isinstance(val, np.ndarray):
+                        print(f"  Key: '{key}' | Shape: {val.shape}")
+                    else:
+                        print(f"  Key: '{key}' | Type: {type(val)}")
+        except Exception as e:
+            print(f"Error loading file: {e}")
+
+
+def load_ic_batch(filepath, idx):
+    """
+    Loads a single sample from 'train-VS-8pairs-IC-081225.mat'
+    Handles the specific reshaping and transposing required for this file.
+    """
+    with h5py.File(filepath, 'r') as f:
+        # 1. Load Ground Truth (Batch, 64, 64) -> Flatten to (4096,)
+        # Note: We take sample 'idx'.
+        s_raw = f['imgs_gt'][idx] # Shape (64, 64)
+        s_vec = s_raw.flatten()   # Shape (4096,)
+        
+        # 2. Load Measurements (Batch, 131072) -> (131072,)
+        d_vec = f['measmnts'][idx] 
+        
+        # 3. Load Mask (Batch, 131072)
+        # 'nanidx': 1 = Invalid/NaN, 0 = Valid
+        nan_vals = f['nanidx'][idx]
+        mask_vec = 1.0 - nan_vals # Invert: 1 = Valid Data
+        
+    return s_vec, d_vec, mask_vec
+
+
+def load_L_matrix(filepath):
+    """
+    Loads the A matrix just once (since it's the same for all patients).
+    """
+    with h5py.File(filepath, 'r') as f:
+        # Shape is (4096, 131072) -> We need (131072, 4096)
+        # We read it and then Transpose (.T)
+        A_matrix = f['A'][:] 
+        return A_matrix.T
