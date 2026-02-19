@@ -199,7 +199,7 @@ def optimize_direct_supervision(sample, L_matrix, model, label, config: ec, use_
 
     model = model.to(_DEVICE)
     coords = sample['coords'].to(_DEVICE)
-    s_gt   = sample['s_gt_normalized'].to(_DEVICE)
+    s_gt_normalized   = sample['s_gt_normalized'].to(_DEVICE)
     s_mean = sample['s_stats'][0].to(_DEVICE).item()
     s_std  = sample['s_stats'][1].to(_DEVICE).item()
 
@@ -214,7 +214,7 @@ def optimize_direct_supervision(sample, L_matrix, model, label, config: ec, use_
         pbar.set_postfix({"method": inspect.currentframe().f_code.co_name, "model": label})
         optimizer.zero_grad()
         s_norm = model(coords)
-        loss = loss_fn(s_norm, s_gt)
+        loss = loss_fn(s_norm, s_gt_normalized)
 
         reg_loss = 0.0
         if config.reg_weight > 0:
