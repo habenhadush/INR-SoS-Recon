@@ -192,274 +192,296 @@ def reconstruct_no_optimal(sample, L_matrix, model, label, config):
     } 
 """
 
-def optimize_direct_supervision(sample, L_matrix, model, label, config:ec, use_wandb=False):
+
+def optimize_direct_supervision(sample, L_matrix, model, label, config: ec, use_wandb=False):
     """Phase 1: Direct GT memorization (no forward model)."""
     logging.info(f"\n--- {inspect.currentframe().f_code.co_name}: Training {label} (Direct GT) on {_DEVICE} ---")
-    
+
     model = model.to(_DEVICE)
     coords = sample['coords'].to(_DEVICE)
     s_gt   = sample['s_gt_normalized'].to(_DEVICE)
     s_mean = sample['s_stats'][0].to(_DEVICE).item()
     s_std  = sample['s_stats'][1].to(_DEVICE).item()
-    
+
     optimizer = optim.Adam(model.parameters(), lr=config.lr)
     scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=config.steps, eta_min=1e-6)
     loss_fn = nn.MSELoss()
-    
+
     loss_history = []
     pbar = tqdm(range(config.steps))
-    
+
     for step in pbar:
-        pbar.set_postfix({"method": f'{inspect.currentframe().f_code.co_name}', "model": label})
+        pbar.set_postfix({"method": inspect.currentframe().f_code.co_name, "model": label})
         optimizer.zero_grad()
         s_norm = model(coords)
         loss = loss_fn(s_norm, s_gt)
-        
+
         reg_loss = 0.0
         if config.reg_weight > 0:
             reg_loss = config.reg_weight * (s_norm ** 2).mean()
-            total_loss = loss + reg_loss
-        else:
-            total_loss = loss
-        
+
+        total_loss = loss + reg_loss
         total_loss.backward()
         optimizer.step()
         scheduler.step()
-        
+
         loss_history.append(total_loss.item())
-        
+
         if step % 50 == 0:
             pbar.set_description(f"Loss: {loss.item():.4e}")
 
-        # --- WANDB LOGGING INSIDE THE LOOP ---
         if use_wandb:
             wandb.log({
-                "Total Loss": total_loss.item(),
-                "MSE Loss": loss.item(),
+                "Total Loss":    total_loss.item(),
+                "MSE Loss":      loss.item(),
                 "Learning Rate": scheduler.get_last_lr()[0]
-            })
-            
+            }, step=step)
+
     model.eval()
     with torch.no_grad():
         s_norm = model(coords)
         s_phys = s_norm * s_std + s_mean
-        
+
     return {
-        's_phys': s_phys.detach().cpu(), 's_norm': s_norm.detach().cpu(),
-        'loss_history': loss_history, 'model_state': model.state_dict()
+        's_phys':       s_phys.detach().cpu(),
+        's_norm':       s_norm.detach().cpu(),
+        'loss_history': loss_history,
+        'model_state':  model.state_dict()
     }
 
-def optimize_full_forward_operator(sample, L_matrix, model, label, config:ec, use_wandb=False):
+
+def optimize_full_forward_operator(sample, L_matrix, model, label, config: ec, use_wandb=False):
     """Phase 1: Full-matrix reconstruction."""
     logging.info(f"\n--- {inspect.currentframe().f_code.co_name}: Training {label} (full-matrix) on {_DEVICE} ---")
-    
-    model = model.to(_DEVICE)
+
+    model  = model.to(_DEVICE)
     coords = sample['coords'].to(_DEVICE)
     d_meas = sample['d_meas'].to(_DEVICE)
     mask   = sample['mask'].to(_DEVICE)
     s_mean = sample['s_stats'][0].item()
     s_std  = sample['s_stats'][1].item()
-    L = L_matrix.to(_DEVICE)
+    L      = L_matrix.to(_DEVICE)
 
     optimizer = optim.Adam(model.parameters(), lr=config.lr)
     scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=config.steps)
-    
+
     loss_history = []
     pbar = tqdm(range(config.steps))
-    
+
     for step in pbar:
-        pbar.set_postfix({"method": f'{inspect.currentframe().f_code.co_name}', "model": label})
+        pbar.set_postfix({"method": inspect.currentframe().f_code.co_name, "model": label})
+        model.train()
         optimizer.zero_grad()
+
         s_norm = model(coords)
         s_phys = s_norm * s_std + s_mean
-        
-        d_pred_seconds = L @ s_phys
+
+        d_pred_seconds   = L @ s_phys
         residual_seconds = (d_pred_seconds - d_meas) * mask
         loss = ((residual_seconds * config.time_scale) ** 2).sum() / (mask.sum() + 1e-8)
-        
+
         reg_loss = 0
         if config.reg_weight > 0:
             reg_loss += config.reg_weight * (s_norm ** 2).mean()
-        if config.tv_weight > 0 :
-            s_img = s_phys.reshape(64,64)
-            tv_x = ((s_img[:, 1:] - s_img[:, :-1]) ** 2).mean()
-            tv_z = ((s_img[1:, :] - s_img[:-1, :]) ** 2).mean()
-            reg_loss += config.tv_weight* (tv_x + tv_z)
-                  
+        if config.tv_weight > 0:
+            s_img = s_phys.reshape(64, 64)
+            tv_x  = ((s_img[:, 1:] - s_img[:, :-1]) ** 2).mean()
+            tv_z  = ((s_img[1:, :] - s_img[:-1, :]) ** 2).mean()
+            reg_loss += config.tv_weight * (tv_x + tv_z)
+
         total_loss = loss + reg_loss
         total_loss.backward()
         optimizer.step()
         scheduler.step()
-        
+
         loss_history.append(total_loss.item())
+
         if step % 50 == 0:
             pbar.set_description(f"Loss (us^2): {loss.item():.4f}")
 
-        # --- WANDB LOGGING INSIDE THE LOOP ---
         if use_wandb:
             wandb.log({
-                "Total Loss": total_loss.item(),
-                "MSE Loss": loss.item(),
+                "Total Loss":    total_loss.item(),
+                "Data Loss":     loss.item(),
                 "Learning Rate": scheduler.get_last_lr()[0]
             }, step=step)
 
+    # ── FIX: eval mode for final inference ──────────────────────────────────
+    model.eval()
+    with torch.no_grad():
+        s_norm = model(coords)
+        s_phys = s_norm * s_std + s_mean
+
     return {
-        's_phys': s_phys.detach().cpu(), 's_norm': s_norm.detach().cpu(),
-        'loss_history': loss_history, 'model_state': model.state_dict()
+        's_phys':       s_phys.detach().cpu(),
+        's_norm':       s_norm.detach().cpu(),
+        'loss_history': loss_history,
+        'model_state':  model.state_dict()
     }
 
-def optimize_sequential_views(sample, L_matrix, model, label, config:ec, use_wandb=False):
+
+def optimize_sequential_views(sample, L_matrix, model, label, config: ec, use_wandb=False):
     """Phase 2b: Pair-by-pair reconstruction."""
     logging.info(f"\n--- {inspect.currentframe().f_code.co_name}: Training {label} (Pair-by-Pair) on {_DEVICE} ---")
-        
-    model = model.to(_DEVICE)
-    coords   = sample['coords'].to(_DEVICE)
-    d_meas   = sample['d_meas'].to(_DEVICE)
-    mask     = sample['mask'].to(_DEVICE)
+
+    model  = model.to(_DEVICE)
+    coords = sample['coords'].to(_DEVICE)
+    d_meas = sample['d_meas'].to(_DEVICE)
+    mask   = sample['mask'].to(_DEVICE)
     s_mean = sample['s_stats'][0].item()
     s_std  = sample['s_stats'][1].item()
-    L = L_matrix.to(_DEVICE)
-    
-    n_pairs = 8
+    L      = L_matrix.to(_DEVICE)
+
+    n_pairs   = 8
     pair_size = L.shape[0] // n_pairs
-    L_pairs = [L[k*pair_size:(k+1)*pair_size, :] for k in range(n_pairs)]
-    d_pairs = [d_meas[k*pair_size:(k+1)*pair_size] for k in range(n_pairs)]
-    m_pairs = [mask[k*pair_size:(k+1)*pair_size] for k in range(n_pairs)]
-    
+    L_pairs   = [L[k * pair_size:(k + 1) * pair_size, :] for k in range(n_pairs)]
+    d_pairs   = [d_meas[k * pair_size:(k + 1) * pair_size] for k in range(n_pairs)]
+    m_pairs   = [mask[k * pair_size:(k + 1) * pair_size]   for k in range(n_pairs)]
+
     optimizer = optim.Adam(model.parameters(), lr=config.lr)
-    scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=config.steps * n_pairs, eta_min=1e-6)
+    scheduler = optim.lr_scheduler.CosineAnnealingLR(
+        optimizer, T_max=config.steps * n_pairs, eta_min=1e-6
+    )
+
     loss_history = []
     pbar = tqdm(range(config.steps))
-    
+
     for step in pbar:
         step_pair_losses = []
         pair_order = torch.randperm(n_pairs).tolist()
-        pbar.set_postfix({"method": f'{inspect.currentframe().f_code.co_name}', "model": label})
+        pbar.set_postfix({"method": inspect.currentframe().f_code.co_name, "model": label})
+
         for k in pair_order:
+            model.train()
             optimizer.zero_grad()
             s_norm = model(coords)
             s_phys = s_norm * s_std + s_mean
-            
-            d_pred_k = L_pairs[k] @ s_phys
+
+            d_pred_k   = L_pairs[k] @ s_phys
             residual_k = (d_pred_k - d_pairs[k]) * m_pairs[k]
-            loss_k = ((residual_k * config.time_scale) ** 2).sum() / (m_pairs[k].sum() + 1e-8)
-            
+            loss_k     = ((residual_k * config.time_scale) ** 2).sum() / (m_pairs[k].sum() + 1e-8)
+
             reg_loss = 0
             if config.reg_weight > 0:
                 reg_loss = config.reg_weight * (s_norm ** 2).mean()
-            if config.tv_weight > 0 :
-                s_img = s_phys.reshape(64,64)
-                tv_x = torch.abs(s_img[:, 1:] - s_img[:, :-1]).mean()
-                tv_z = torch.abs(s_img[1:, :] - s_img[:-1, :]).mean()
+            if config.tv_weight > 0:
+                s_img  = s_phys.reshape(64, 64)
+                tv_x   = torch.abs(s_img[:, 1:] - s_img[:, :-1]).mean()
+                tv_z   = torch.abs(s_img[1:, :] - s_img[:-1, :]).mean()
                 reg_loss += config.tv_weight * (tv_x + tv_z)
-              
+
             total_loss = loss_k + reg_loss
             total_loss.backward()
             optimizer.step()
             step_pair_losses.append(loss_k.item())
-            
+
         scheduler.step()
         avg_loss = np.mean(step_pair_losses)
         loss_history.append(avg_loss)
-        
+
         if step % 50 == 0:
             pbar.set_description(f"Loss (us^2): {avg_loss:.4f}")
 
-        # --- WANDB LOGGING INSIDE THE LOOP ---
         if use_wandb:
             wandb.log({
                 "Avg Pair Loss": avg_loss,
                 "Learning Rate": scheduler.get_last_lr()[0]
             }, step=step)
-            
+
     model.eval()
     with torch.no_grad():
         s_norm = model(coords)
         s_phys = s_norm * s_std + s_mean
-        
+
     return {
-        's_phys': s_phys.detach().cpu(), 's_norm': s_norm.detach().cpu(),
-        'loss_history': loss_history, 'model_state': model.state_dict()
+        's_phys':       s_phys.detach().cpu(),
+        's_norm':       s_norm.detach().cpu(),
+        'loss_history': loss_history,
+        'model_state':  model.state_dict()
     }
 
-def optimize_stochastic_ray_batching(sample, L_matrix, model, label, config:ec, use_wandb=False):
+
+def optimize_stochastic_ray_batching(sample, L_matrix, model, label, config: ec, use_wandb=False):
     """Phase 3: Fast GPU Slicing."""
     logging.info(f"\n--- {inspect.currentframe().f_code.co_name}: Training {label} (Fast GPU Slicing) on {_DEVICE} ---")
-    
-    model = model.to(_DEVICE)
+
+    model  = model.to(_DEVICE)
     coords = sample['coords'].to(_DEVICE)
     s_mean = sample['s_stats'][0].item()
     s_std  = sample['s_stats'][1].item()
-    L = L_matrix.to(_DEVICE)            
+    L      = L_matrix.to(_DEVICE)
     d_meas = sample['d_meas'].to(_DEVICE)
-    mask = sample['mask'].to(_DEVICE)
-    
-    total_rays = L.shape[0]
+    mask   = sample['mask'].to(_DEVICE)
+
+    total_rays     = L.shape[0]
     steps_per_epoch = int(np.ceil(total_rays / config.batch_size))
-    total_steps = config.epochs * steps_per_epoch
-    
+    total_steps    = config.epochs * steps_per_epoch
+
     optimizer = optim.Adam(model.parameters(), lr=config.lr)
     scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=total_steps, eta_min=1e-6)
-    
+
     loss_history = []
     pbar = tqdm(range(config.epochs), desc="Epochs")
-    
+
     for epoch in pbar:
-        pbar.set_postfix({"method": f'{inspect.currentframe().f_code.co_name}', "model": label})
-        epoch_loss = 0.0
+        pbar.set_postfix({"method": inspect.currentframe().f_code.co_name, "model": label})
+        epoch_loss       = 0.0
         permuted_indices = torch.randperm(total_rays, device=_DEVICE)
+
         for step in range(steps_per_epoch):
+            model.train()
             optimizer.zero_grad()
+
             start_idx = step * config.batch_size
-            end_idx = min(start_idx + config.batch_size, total_rays)
+            end_idx   = min(start_idx + config.batch_size, total_rays)
             batch_idx = permuted_indices[start_idx:end_idx]
-            
-            L_batch = L[batch_idx]
-            d_batch = d_meas[batch_idx]
-            m_batch = mask[batch_idx]
-            
-            s_norm = model(coords)
-            s_phys = s_norm * s_std + s_mean
-            d_pred_batch = L_batch @ s_phys
-            
-            residual = (d_pred_batch - d_batch) * m_batch
+
+            L_batch   = L[batch_idx]
+            d_batch   = d_meas[batch_idx]
+            m_batch   = mask[batch_idx]
+
+            s_norm  = model(coords)
+            s_phys  = s_norm * s_std + s_mean
+            d_pred  = L_batch @ s_phys
+            residual = (d_pred - d_batch) * m_batch
             loss_data = ((residual * config.time_scale) ** 2).sum() / (m_batch.sum() + 1e-8)
-            
+
             reg_loss = 0
             if config.reg_weight > 0:
                 reg_loss = config.reg_weight * (s_norm ** 2).mean()
             if config.tv_weight > 0:
-                s_img = s_phys.reshape(64, 64)
-                tv_x = torch.abs(s_img[:, 1:] - s_img[:, :-1]).mean()
-                tv_z = torch.abs(s_img[1:, :] - s_img[:-1, :]).mean()
+                s_img  = s_phys.reshape(64, 64)
+                tv_x   = torch.abs(s_img[:, 1:] - s_img[:, :-1]).mean()
+                tv_z   = torch.abs(s_img[1:, :] - s_img[:-1, :]).mean()
                 reg_loss += config.tv_weight * (tv_x + tv_z)
-                
+
             total_loss = loss_data + reg_loss
             total_loss.backward()
             optimizer.step()
             scheduler.step()
-            
+
             epoch_loss += loss_data.item()
-            
+
         avg_epoch_loss = epoch_loss / steps_per_epoch
         loss_history.append(avg_epoch_loss)
-            
+
         if epoch % config.log_interval == 0:
             pbar.set_description(f"Avg Loss (us^2): {avg_epoch_loss:.4f}")
 
-        # --- WANDB LOGGING INSIDE THE LOOP ---
         if use_wandb:
             wandb.log({
                 "Avg Epoch Loss": avg_epoch_loss,
-                "Learning Rate": scheduler.get_last_lr()[0]
+                "Learning Rate":  scheduler.get_last_lr()[0]
             }, step=epoch)
 
     model.eval()
     with torch.no_grad():
         s_norm = model(coords)
         s_phys = s_norm * s_std + s_mean
-    
+
     return {
-        's_phys': s_phys.detach().cpu(), 's_norm': s_norm.detach().cpu(),
-        'loss_history': loss_history, 'model_state': model.state_dict()
+        's_phys':       s_phys.detach().cpu(),
+        's_norm':       s_norm.detach().cpu(),
+        'loss_history': loss_history,
+        'model_state':  model.state_dict()
     }

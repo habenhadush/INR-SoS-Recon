@@ -124,6 +124,7 @@ class USDataset(Dataset):
             'idx': idx
         }      
 
+
 class RayDataset(Dataset):
     def __init__(self, L_matrix, displacement_filed, mask) -> None:
         super().__init__()
