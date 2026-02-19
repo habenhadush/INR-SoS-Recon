@@ -17,11 +17,10 @@ def load_mat(filepath):
     """
     filepath = Path(filepath)
     
-    # 1. Try generic Scipy Load (Fastest for v7.2 and older)
     try:
         return scipy.io.loadmat(str(filepath))
     except NotImplementedError:
-        pass  # It's a v7.3 file, switch to HDF5
+        pass  #  HDF5
     
     # 2. HDF5 Handler (v7.3)
     print(f"Detected v7.3 MATLAB file: {filepath.name}")
@@ -69,6 +68,7 @@ def clear_cache():
     memory.clear(warn=False)
 
 def inspect_mat_fileheader(filepath: str):
+    filepath = Path(filepath)
     try:
         with h5py.File(filepath, 'r') as f:
             print("\n[HDF5 Format Detected]")

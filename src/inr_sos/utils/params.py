@@ -33,14 +33,14 @@ class USGrid:
         return x_norm, z_norm
     
 
-    def denormalize(self, x, z):
+    def denormalize(self, x_norm, z_norm):
         """ 
             Denormalize coordinates from [-1, 1] range back to original
             Formula: 0.5 * (val + 1) * (max - min) + min
         """
-        x_norm = 2 * (x - self.x_min) / (self.x_max - self.x_min) - 1
-        z_norm = 2 * (z - self.z_min) / (self.z_max - self.z_min) - 1
-        return x_norm, z_norm
+        x = 0.5 * (x_norm + 1) * (self.x_max - self.x_min) + self.x_min
+        z = 0.5 * (z_norm + 1) * (self.z_max - self.z_min) + self.z_min
+        return x, z
     
 
     def __str__(self) -> str:
