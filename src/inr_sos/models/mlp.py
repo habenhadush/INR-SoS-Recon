@@ -32,8 +32,10 @@ class ReluMLP(nn.Module):
 class GaussianFourierFeatureMapping(nn.Module):
     def __init__(self, in_features=2, mapping_size=64, scale=10):
         super().__init__()
-        self.B = torch.randn(in_features, mapping_size) * scale
-        self.register_buffer('B_matrix', self.B)
+        self.register_buffer(
+            'B_matrix',
+            torch.randn(in_features, mapping_size) * scale
+        )
     
     def forward(self, coords):
         x_proj = (2. * np.pi * coords) @ self.B_matrix

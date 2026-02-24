@@ -1,21 +1,28 @@
 """
-sweep_config.py
----------------
-W&B Bayesian sweep configurations for each model type.
+sweep_agent.py  (unified)
+-------------------------
+One Bayesian sweep that jointly optimises over:
+  - method      (Full_Matrix | Sequential_SGD | Ray_Batching)
+  - model_type  (FourierMLP | ReluMLP | SirenMLP)
+  - all shared and model/method-specific hyperparameters
 
-Usage
------
-    import wandb
-    from inr_sos.evaluation.sweep_config import get_sweep_config, run_sweep_agent
+This produces a single PCP in W&B with method and model_type as axes
+alongside lr, scale, mapping_size etc., coloured by MAE_mean.
 
-    # 1. Create the sweep (returns a sweep_id)
-    sweep_id = wandb.sweep(
-        get_sweep_config("FourierMLP", method="Full_Matrix"),
-        project="INR-SoS-Recon"
-    )
+Design notes
+------------
+All model-specific params (scale, omega) and method-specific params
+(epochs, batch_size) are included in the global parameters dict.
+W&B passes every param to every trial regardless of which model/method
+is sampled. _sweep_train_fn reads only the relevant ones based on the
+sampled method and model_type, ignoring the rest. This is the standard
+W&B pattern for conditional hyperparameter spaces.
 
-    # 2. Launch agents (can run on multiple GPUs / machines)
-    run_sweep_agent(sweep_id, dataset, target_indices, n_runs=20)
+Step-logging fix (from previous version)
+-----------------------------------------
+engine_fn is called with use_wandb=False so the engine's internal
+step=0..N-1 logging does not conflict with the sweep run's step cursor.
+Per-sample final metrics are logged at step=sample_num (monotonic).
 """
 
 import wandb
@@ -25,89 +32,76 @@ import numpy as np
 
 from inr_sos.utils.config import ExperimentConfig
 from inr_sos.evaluation.metrics import calculate_metrics
-from inr_sos.utils.tracker import save_artifacts
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-# Sweep search spaces
+# Unified sweep config
 # ──────────────────────────────────────────────────────────────────────────────
-
-_COMMON_PARAMS = {
-    # Architecture
-    "hidden_features": {"values": [128, 256, 512]},
-    "hidden_layers":   {"values": [2, 3, 4, 5]},
-    # Optimisation
-    "lr":              {"distribution": "log_uniform_values", "min": 1e-5, "max": 1e-3},
-    "steps":           {"values": [1000, 2000, 3000]},
-    # Regularisation
-    "tv_weight":       {"distribution": "log_uniform_values", "min": 1e-6, "max": 1e-2},
-    "reg_weight":      {"distribution": "log_uniform_values", "min": 1e-6, "max": 1e-2},
-}
-
-_MODEL_SPECIFIC = {
-    "FourierMLP": {
-        "mapping_size": {"values": [32, 64, 128, 256]},
-        "scale":        {"distribution": "uniform", "min": 0.1, "max": 20.0},
-    },
-    "SirenMLP": {
-        "mapping_size": {"values": [32, 64, 128]},   # unused by SIREN but kept for API compat
-        "omega":        {"distribution": "uniform", "min": 10.0, "max": 60.0},
-    },
-    "ReluMLP": {
-        "mapping_size": {"values": [64]},   # ReluMLP ignores mapping_size; placeholder
-    },
-}
-
-# For ray-batching engine the epochs/batch_size matter instead of steps
-_RAY_BATCHING_EXTRA = {
-    "epochs":     {"values": [100, 150, 200]},
-    "batch_size": {"values": [2048, 4096, 8192]},
-}
-
 
 def get_sweep_config(
-    model_type: str,
-    method: str = "Full_Matrix",
     metric_goal: str = "MAE_mean",
     metric_direction: str = "minimize",
 ) -> dict:
     """
-    Returns a W&B sweep config dict for the given (model_type, method) pair.
+    Returns a single W&B Bayesian sweep config covering all 3 methods
+    × 3 models × shared hyperparameters.
 
-    Parameters
-    ----------
-    model_type       : "FourierMLP" | "SirenMLP" | "ReluMLP"
-    method           : "Full_Matrix" | "Sequential_SGD" | "Ray_Batching"
-    metric_goal      : W&B metric name to optimise (must be logged in the sweep run)
-    metric_direction : "minimize" | "maximize"
+    The PCP in W&B will show:
+      method | model_type | hidden_features | hidden_layers | lr |
+      mapping_size | scale | omega | reg_weight | tv_weight | steps |
+      epochs | batch_size | CNR_mean | MAE_mean | SSIM_mean | RMSE_mean
+
+    Coloured by MAE_mean (set in the W&B UI: colour axis → MAE_mean).
     """
-    if model_type not in _MODEL_SPECIFIC:
-        raise ValueError(f"Unknown model_type '{model_type}'. "
-                         f"Choose from {list(_MODEL_SPECIFIC.keys())}")
-
-    params = {**_COMMON_PARAMS, **_MODEL_SPECIFIC[model_type]}
-
-    if method == "Ray_Batching":
-        params.update(_RAY_BATCHING_EXTRA)
-
     return {
         "method": "bayes",
-        "name":   f"sweep_{model_type}_{method}",
+        "name":   "unified_sweep_all_methods_models",
         "metric": {
             "name": metric_goal,
             "goal": metric_direction,
         },
-        "parameters": params,
-        # Early termination: stop runs that are clearly worse than the best so far
+        "parameters": {
+            # ── What to vary (the two new categorical axes) ──────────────
+            "method": {
+                "values": ["Full_Matrix", "Sequential_SGD", "Ray_Batching"]
+            },
+            "model_type": {
+                "values": ["FourierMLP", "ReluMLP", "SirenMLP"]
+            },
+
+            # ── Shared architecture params ────────────────────────────────
+            "hidden_features": {"values": [128, 256, 512]},
+            "hidden_layers":   {"values": [2, 3, 4, 5]},
+
+            # ── Shared optimisation params ────────────────────────────────
+            "lr":    {"distribution": "log_uniform_values", "min": 1e-5, "max": 1e-3},
+            "steps": {"values": [1000, 2000, 3000]},
+
+            # ── Shared regularisation ─────────────────────────────────────
+            "tv_weight":  {"distribution": "log_uniform_values", "min": 1e-6, "max": 1e-2},
+            "reg_weight": {"distribution": "log_uniform_values", "min": 1e-6, "max": 1e-2},
+
+            # ── FourierMLP-specific (ignored when model_type != FourierMLP)
+            "mapping_size": {"values": [32, 64, 128, 256]},
+            "scale":        {"distribution": "uniform", "min": 0.1, "max": 20.0},
+
+            # ── SirenMLP-specific (ignored when model_type != SirenMLP) ──
+            "omega": {"distribution": "uniform", "min": 10.0, "max": 60.0},
+
+            # ── Ray_Batching-specific (ignored for other methods) ─────────
+            "epochs":     {"values": [100, 150, 200]},
+            "batch_size": {"values": [2048, 4096, 8192]},
+        },
+        # Kill clearly bad trials early (saves ~40% GPU time over 30 runs)
         "early_terminate": {
-            "type":   "hyperband",
+            "type":     "hyperband",
             "min_iter": 3,
         },
     }
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-# Agent entry-point
+# Agent
 # ──────────────────────────────────────────────────────────────────────────────
 
 def run_sweep_agent(
@@ -115,23 +109,24 @@ def run_sweep_agent(
     dataset,
     target_indices: list,
     base_config: ExperimentConfig,
-    model_type: str,
-    method: str,
-    n_runs: int = 30,
+    n_runs: int = 60,
+    entity: str = None,
+    project: str = None,
 ):
     """
-    Launches a W&B sweep agent that calls _sweep_train_fn for each trial.
+    Launch the unified sweep agent.
 
     Parameters
     ----------
-    sweep_id       : returned by wandb.sweep(...)
-    dataset        : USDataset instance
-    target_indices : list of sample indices to average metrics over
-    base_config    : ExperimentConfig used as the base (sweep overrides it)
-    model_type     : "FourierMLP" | "SirenMLP" | "ReluMLP"
-    method         : "Full_Matrix" | "Sequential_SGD" | "Ray_Batching"
-    n_runs         : number of sweep trials
+    sweep_id       : returned by wandb.sweep(get_sweep_config(), project=...)
+    dataset        : USDataset
+    target_indices : samples to average metrics over (recommend n≥5)
+    base_config    : ExperimentConfig used as baseline; sweep overrides it
+    n_runs         : total Bayesian trials (recommend 60 for 9 combos × ~7 trials each)
+    entity         : W&B entity (username or team). If None, uses wandb default.
+    project        : W&B project name. If None, uses base_config.project_name.
     """
+    project = project or base_config.project_name
     from inr_sos.models.mlp import FourierMLP, ReluMLP
     from inr_sos.models.siren import SirenMLP
     from inr_sos.training.engines import (
@@ -151,51 +146,61 @@ def run_sweep_agent(
         "SirenMLP":   SirenMLP,
     }
 
-    engine_fn = _engine_map[method]
-    model_cls = _model_map[model_type]
-
     def _sweep_train_fn():
-        """Called once per sweep trial by the W&B agent."""
-        run = wandb.init()   # W&B agent fills wandb.config automatically
-        sweep_cfg = wandb.config
+        wandb.init()
+        sc = wandb.config   # W&B fills this from the sampled parameters
 
-        # ── Merge sweep params into a cloned ExperimentConfig ────────────
+        # ── Which method and model did the sweep sample? ──────────────────
+        method     = sc.get("method",     "Full_Matrix")
+        model_type = sc.get("model_type", "FourierMLP")
+
+        engine_fn = _engine_map[method]
+        model_cls = _model_map[model_type]
+
+        # ── Build config — merge sweep values over the base ───────────────
         cfg = copy.deepcopy(base_config)
         cfg.model_type       = model_type
         cfg.experiment_group = method
-        cfg.hidden_features  = sweep_cfg.get("hidden_features", cfg.hidden_features)
-        cfg.hidden_layers    = sweep_cfg.get("hidden_layers",   cfg.hidden_layers)
-        cfg.lr               = sweep_cfg.get("lr",              cfg.lr)
-        cfg.steps            = sweep_cfg.get("steps",           cfg.steps)
-        cfg.tv_weight        = sweep_cfg.get("tv_weight",       cfg.tv_weight)
-        cfg.reg_weight       = sweep_cfg.get("reg_weight",      cfg.reg_weight)
-        cfg.mapping_size     = sweep_cfg.get("mapping_size",    cfg.mapping_size)
 
-        if model_type == "FourierMLP":
-            cfg.scale = sweep_cfg.get("scale", cfg.scale)
-        elif model_type == "SirenMLP":
-            cfg.omega = sweep_cfg.get("omega", cfg.omega)
+        # Shared params
+        cfg.hidden_features = sc.get("hidden_features", cfg.hidden_features)
+        cfg.hidden_layers   = sc.get("hidden_layers",   cfg.hidden_layers)
+        cfg.lr              = sc.get("lr",              cfg.lr)
+        cfg.steps           = sc.get("steps",           cfg.steps)
+        cfg.tv_weight       = sc.get("tv_weight",       cfg.tv_weight)
+        cfg.reg_weight      = sc.get("reg_weight",      cfg.reg_weight)
 
+        # Model-specific (read regardless, each model uses only its own)
+        cfg.mapping_size = sc.get("mapping_size", cfg.mapping_size)
+        cfg.scale        = sc.get("scale",        cfg.scale)   # FourierMLP
+        cfg.omega        = sc.get("omega",        cfg.omega)   # SirenMLP
+
+        # Method-specific (only Ray_Batching uses these)
         if method == "Ray_Batching":
-            cfg.epochs     = sweep_cfg.get("epochs",     cfg.epochs)
-            cfg.batch_size = sweep_cfg.get("batch_size", cfg.batch_size)
+            cfg.epochs     = sc.get("epochs",     cfg.epochs)
+            cfg.batch_size = sc.get("batch_size", cfg.batch_size)
 
-        # ── Train on every target sample, average the metrics ─────────────
+        # ── Train on every target sample ──────────────────────────────────
         all_mae, all_ssim, all_rmse, all_cnr = [], [], [], []
 
-        for idx in target_indices:
+        for sample_num, idx in enumerate(target_indices):
             sample = dataset[idx]
             cfg.sample_idx = idx
 
-            model = _build_sweep_model(model_cls, model_type, cfg)
+            model = _build_model(model_cls, model_type, cfg)
+
+            # use_wandb=False: prevents step regression warnings.
+            # Engine logs step=0..N internally; with multiple samples that
+            # resets to 0 each time → W&B drops everything after sample 1.
             result_dict = engine_fn(
                 sample=sample,
                 L_matrix=dataset.L_matrix,
                 model=model,
                 label=model_type,
                 config=cfg,
-                use_wandb=True,   # step-level loss curves logged here
+                use_wandb=False,
             )
+
             metrics = calculate_metrics(
                 s_phys_pred=result_dict["s_phys"],
                 s_gt_raw=sample["s_gt_raw"],
@@ -206,7 +211,16 @@ def run_sweep_agent(
             all_rmse.append(metrics["RMSE"])
             all_cnr.append(metrics["CNR"])
 
-        # ── Log the aggregate metric that the sweep optimises ─────────────
+            # Per-sample metrics — step is sample_num (monotonic, safe)
+            wandb.log({
+                "sample/MAE":  metrics["MAE"],
+                "sample/SSIM": metrics["SSIM"],
+                "sample/RMSE": metrics["RMSE"],
+                "sample/CNR":  metrics["CNR"],
+                "sample/idx":  idx,
+            }, step=sample_num)
+
+        # ── Aggregate — what the Bayesian optimiser reads ─────────────────
         wandb.log({
             "MAE_mean":  float(np.mean(all_mae)),
             "MAE_std":   float(np.std(all_mae)),
@@ -219,30 +233,28 @@ def run_sweep_agent(
         })
         wandb.finish()
 
-    wandb.agent(sweep_id, function=_sweep_train_fn, count=n_runs)
+    wandb.agent(
+        sweep_id,
+        function=_sweep_train_fn,
+        count=n_runs,
+        entity=entity,
+        project=project,
+    )
 
 
-def _build_sweep_model(model_cls, model_name: str, cfg: ExperimentConfig):
+# ──────────────────────────────────────────────────────────────────────────────
+# Helper
+# ──────────────────────────────────────────────────────────────────────────────
+
+def _build_model(model_cls, model_name: str, cfg: ExperimentConfig):
+    kwargs = dict(
+        in_features=cfg.in_features,
+        hidden_features=cfg.hidden_features,
+        hidden_layers=cfg.hidden_layers,
+        mapping_size=cfg.mapping_size,
+    )
     if model_name == "FourierMLP":
-        return model_cls(
-            in_features=cfg.in_features,
-            hidden_features=cfg.hidden_features,
-            hidden_layers=cfg.hidden_layers,
-            mapping_size=cfg.mapping_size,
-            scale=cfg.scale,
-        )
+        kwargs["scale"] = cfg.scale
     elif model_name == "SirenMLP":
-        return model_cls(
-            in_features=cfg.in_features,
-            hidden_features=cfg.hidden_features,
-            hidden_layers=cfg.hidden_layers,
-            mapping_size=cfg.mapping_size,
-            omega=cfg.omega,
-        )
-    else:  # ReluMLP
-        return model_cls(
-            in_features=cfg.in_features,
-            hidden_features=cfg.hidden_features,
-            hidden_layers=cfg.hidden_layers,
-            mapping_size=cfg.mapping_size,
-        )
+        kwargs["omega"] = cfg.omega
+    return model_cls(**kwargs)
