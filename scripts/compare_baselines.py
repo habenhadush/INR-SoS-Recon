@@ -47,6 +47,7 @@ from inr_sos import DATA_DIR
 from inr_sos.utils.data import USDataset
 from inr_sos.utils.config import ExperimentConfig
 from inr_sos.evaluation.metrics import calculate_metrics
+from scripts.run_sweep import load_dataset_config
 
 SCRIPTS_DIR   = Path(__file__).parent
 REGISTRY_FILE = SCRIPTS_DIR / "sweep_registry.json"
@@ -54,10 +55,7 @@ LOG_DIR       = SCRIPTS_DIR / "logs"
 LOG_DIR.mkdir(exist_ok=True)
 
 
-# ─────────────────────────────────────────────────────────────────────────────
 # Logging — named logger avoids basicConfig no-op if inr_sos configures root
-# ─────────────────────────────────────────────────────────────────────────────
-
 def setup_logging(sweep_id: str, mode: str):
     log_path = LOG_DIR / f"comparison_{mode}_{sweep_id}.log"
     logger   = logging.getLogger("compare_baselines")
@@ -74,10 +72,7 @@ def setup_logging(sweep_id: str, mode: str):
     return log_path, logger
 
 
-# ─────────────────────────────────────────────────────────────────────────────
 # Registry helpers
-# ─────────────────────────────────────────────────────────────────────────────
-
 def load_registry(sweep_id: str):
     with open(REGISTRY_FILE) as f:
         registry = json.load(f)
@@ -109,10 +104,7 @@ def get_best_config(entry: dict) -> dict:
     return rank4 if rank4 else entry["validation"]["best_on_holdout"]
 
 
-# ─────────────────────────────────────────────────────────────────────────────
 # Metrics
-# ─────────────────────────────────────────────────────────────────────────────
-
 def compute_baseline_metrics(recons: np.ndarray,
                               gt: np.ndarray,
                               indices: list,
@@ -162,10 +154,7 @@ def _aggregate(label, mae, rmse, ssim, cnr, n) -> dict:
     }
 
 
-# ─────────────────────────────────────────────────────────────────────────────
 # INR fresh run
-# ─────────────────────────────────────────────────────────────────────────────
-
 def run_inr_fresh(best_cfg_entry: dict,
                   dataset: USDataset,
                   indices: list,
@@ -276,7 +265,6 @@ def run_inr_fresh(best_cfg_entry: dict,
             "sample/SSIM": m["SSIM"],
             "sample/CNR":  m["CNR"],
             "sample/idx":  idx,
-            # Running means so you can watch convergence in the dashboard
             "running/MAE_mean":  float(np.mean(all_mae)),
             "running/RMSE_mean": float(np.mean(all_rmse)),
             "running/SSIM_mean": float(np.mean(all_ssim)),
@@ -303,11 +291,7 @@ def run_inr_fresh(best_cfg_entry: dict,
     wandb.finish()
     return result
 
-
-# ─────────────────────────────────────────────────────────────────────────────
 # Reporting
-# ─────────────────────────────────────────────────────────────────────────────
-
 def print_comparison_table(all_results: list, log):
     n = all_results[0]["n_samples"]
     log.info(f"\n{'═'*95}")
@@ -397,12 +381,10 @@ def log_to_wandb(all_results: list, entry: dict, indices: list, mode: str):
     wandb.finish()
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Main
-# ─────────────────────────────────────────────────────────────────────────────
-
 def main():
     parser = argparse.ArgumentParser()
+    parser.add_argument("--dataset", default=None,
+                    help="Dataset key from datasets.yaml (default: uses 'active' field)")
     parser.add_argument("--sweep_id",     required=True)
     parser.add_argument("--use_registry", action="store_true",
                         help="Use INR results already in registry (no GPU, fast)")
@@ -475,7 +457,8 @@ def main():
         indices = rng.choice(pool, size=args.fresh_n, replace=False).tolist()
         log.info(f"Fresh indices ({len(indices)}): {indices}")
 
-        data_file = DATA_DIR + "/DL-based-SoS/train-VS-8pairs-IC-081225.mat"
+        ds_cfg = load_dataset_config(args.dataset)
+        data_file  = ds_cfg["data_path"]
         grid_file = DATA_DIR + "/DL-based-SoS/forward_model_lr/grid_parameters.mat"
         log.info("Loading dataset for INR run ...")
         dataset = USDataset(data_file, grid_file)

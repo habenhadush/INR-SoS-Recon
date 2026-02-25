@@ -40,10 +40,12 @@ import matplotlib.colors as mcolors
 import matplotlib.gridspec as gridspec
 import matplotlib.patches as mpatches
 import numpy as np
-from PIL import Image
 import wandb
-
 import inr_sos
+import yaml
+
+from PIL import Image
+
 from inr_sos import DATA_DIR
 from inr_sos.utils.data import USDataset
 from inr_sos.utils.config import ExperimentConfig
@@ -61,9 +63,21 @@ SOS_MIN = 1380.0
 SOS_MAX = 1620.0
 
 
-# ─────────────────────────────────────────────────────────────────────────────
 # Utilities
-# ─────────────────────────────────────────────────────────────────────────────
+def load_dataset_config(key: str = None) -> dict:
+    """
+    Load dataset path from scripts/datasets.yaml.
+    key overrides the 'active' field (use for --dataset CLI arg).
+    """
+    cfg_path = SCRIPTS_DIR / "datasets.yaml"
+    with open(cfg_path) as f:
+        cfg = yaml.safe_load(f)
+    key = key or cfg["active"]
+    ds = cfg["datasets"][key]
+    ds["key"] = key
+    ds["data_path"] = DATA_DIR + ds["data_file"]
+    return ds
+
 
 def make_run_tag(description: str, sweep_id: str) -> str:
     ts = datetime.now().strftime("%Y%m%d_%H%M")
@@ -144,10 +158,7 @@ def setup_logging(run_tag: str):
     return log_path, logger
 
 
-# ─────────────────────────────────────────────────────────────────────────────
 # Registry
-# ─────────────────────────────────────────────────────────────────────────────
-
 def load_registry(sweep_id: str):
     with open(REGISTRY_FILE) as f:
         registry = json.load(f)
@@ -171,10 +182,7 @@ def get_used_indices(entry: dict) -> set:
     return used
 
 
-# ─────────────────────────────────────────────────────────────────────────────
 # Metrics
-# ─────────────────────────────────────────────────────────────────────────────
-
 def _aggregate(label, mae, rmse, ssim, cnr, recon_times, per_sample) -> dict:
     return {
         "method":          label,
@@ -229,10 +237,7 @@ def compute_baseline_metrics(recons, gt, indices, label, log) -> dict:
     return result
 
 
-# ─────────────────────────────────────────────────────────────────────────────
 # INR runner
-# ─────────────────────────────────────────────────────────────────────────────
-
 def run_inr_config(sweep_cfg, dataset, indices, base_config, run_tag, log,
                    warm_init: bool = False) -> dict:
     from inr_sos.models.mlp import FourierMLP, ReluMLP
@@ -361,10 +366,7 @@ def run_inr_config(sweep_cfg, dataset, indices, base_config, run_tag, log,
     return agg
 
 
-# ─────────────────────────────────────────────────────────────────────────────
 # Comparison table
-# ─────────────────────────────────────────────────────────────────────────────
-
 def print_table(all_results, log):
     n = all_results[0]["n_samples"]
     log.info(f"\n{'═'*108}")
@@ -387,13 +389,10 @@ def print_table(all_results, log):
     log.info(f"{'═'*108}")
 
 
-# ─────────────────────────────────────────────────────────────────────────────
 # Box plots — redesigned layout
 #   Row 1: MAE | RMSE
 #   Row 2: SSIM | CNR
 #   Row 3: Reconstruction Time (full width)
-# ─────────────────────────────────────────────────────────────────────────────
-
 def make_boxplots(all_results: list) -> plt.Figure:
     """
     Adaptive distribution plot.
@@ -530,15 +529,12 @@ def make_boxplots(all_results: list) -> plt.Figure:
     return fig
 
 
-# ─────────────────────────────────────────────────────────────────────────────
 # Reconstruction grid
 #   Layout: 4 rows × (1 + N_methods) cols
 #     row 0: SoS maps for sample A     (GT | L2 | L1 | rank1 | ...)
 #     row 1: Error maps for sample A
 #     row 2: SoS maps for sample B
 #     row 3: Error maps for sample B
-# ─────────────────────────────────────────────────────────────────────────────
-
 def make_reconstruction_grid(all_results: list,
                               n_visual_samples: int = 2,
                               rng_seed: int = 42) -> plt.Figure:
@@ -653,10 +649,7 @@ def make_reconstruction_grid(all_results: list,
     return fig
 
 
-# ─────────────────────────────────────────────────────────────────────────────
 # W&B summary run
-# ─────────────────────────────────────────────────────────────────────────────
-
 def log_summary_to_wandb(all_results, entry, indices, run_tag, sweep_id, log):
     wb_name = f"{run_tag}_SUMMARY"
     log.info(f"\n  Logging summary → W&B '{wb_name}'")
@@ -716,12 +709,10 @@ def log_summary_to_wandb(all_results, entry, indices, run_tag, sweep_id, log):
     wandb.finish()
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Main
-# ─────────────────────────────────────────────────────────────────────────────
-
 def main():
     parser = argparse.ArgumentParser()
+    parser.add_argument("--dataset", default=None,
+                    help="Dataset key from datasets.yaml (default: uses 'active' field)")
     parser.add_argument("--sweep_id",  required=True)
     parser.add_argument("--top_k",     default=5,  type=int)
     parser.add_argument("--n_samples", default=20, type=int,
@@ -729,10 +720,14 @@ def main():
     parser.add_argument("--no_wandb",  action="store_true")
     parser.add_argument("--warm_init", action="store_true",
                         help="Zero output layer before training so model starts predicting background SoS")
+    parser.add_argument("--top_k_per_model", default=None, type=int,
+                        help="If set, fetch top-K runs per model type (FourierMLP/ReluMLP/SirenMLP) "
+                             "instead of global top-K. Overrides --top_k for config selection only.")
     args = parser.parse_args()
 
     init_tag  = "warm" if args.warm_init else "cold"
-    run_tag   = make_run_tag(f"topk{args.top_k}_fresh{args.n_samples}_{init_tag}",
+    sel_tag   = f"top{args.top_k_per_model}permodel" if args.top_k_per_model else f"topk{args.top_k}"
+    run_tag   = make_run_tag(f"{sel_tag}_fresh{args.n_samples}_{init_tag}",
                              args.sweep_id)
     log_path, log = setup_logging(run_tag)
 
@@ -741,7 +736,9 @@ def main():
     log.info(f"  Sweep    : {args.sweep_id}")
     log.info(f"  Top-K    : {args.top_k}  |  Samples: {args.n_samples}")
     est = args.top_k * args.n_samples * 20
-    log.info(f"  Est. time: ~{est//60}h{est%60:02d}m  (20 min/sample estimate)")
+    n_configs_est = (args.top_k_per_model * 3) if args.top_k_per_model else args.top_k
+    est = n_configs_est * args.n_samples * 20
+    log.info(f"  Est. time: ~{est//60}h{est%60:02d}m  (20 min/sample, {n_configs_est} configs)")
     log.info("=" * 70)
 
     registry, entry = load_registry(args.sweep_id)
@@ -768,25 +765,47 @@ def main():
 
     # ── Dataset ───────────────────────────────────────────────────────────
     log.info("\nLoading dataset ...")
+    ds_cfg = load_dataset_config(args.dataset)
+    log.info(f"Dataset: {ds_cfg['name']}  ({ds_cfg['key']})")
     dataset     = USDataset(
-        DATA_DIR + "/DL-based-SoS/train-VS-8pairs-IC-081225.mat",
+        ds_cfg["data_path"],
         DATA_DIR + "/DL-based-SoS/forward_model_lr/grid_parameters.mat"
     )
     base_config = ExperimentConfig(project_name=entry["project"])
 
-    # ── Fetch top-K configs from W&B ──────────────────────────────────────
+    # ── Fetch configs from W&B ───────────────────────────────────────────
     api   = wandb.Api()
     sweep = api.sweep(
         f"{entry['entity']}/{entry['project']}/{entry['sweep_id']}"
     )
-    runs = sorted(
+    completed = sorted(
         [r for r in sweep.runs if "MAE_mean" in r.summary],
         key=lambda r: r.summary["MAE_mean"]
-    )[:args.top_k]
+    )
+
+    if args.top_k_per_model:
+        # ── Top-K per model type — ensures every architecture is represented ─
+        k = args.top_k_per_model
+        model_types = ["ReluMLP", "FourierMLP", "SirenMLP"]
+        selected = []
+        for mtype in model_types:
+            pool = [r for r in completed if r.config.get("model_type") == mtype]
+            if not pool:
+                log.warning(f"  No completed runs found for model_type={mtype}")
+                continue
+            selected.extend(pool[:k])
+            log.info(f"  {mtype}: {len(pool)} completed → taking top-{min(k, len(pool))}"
+                     f"  (best MAE={pool[0].summary['MAE_mean']:.3f})")
+        # Sort selected by MAE for consistent rank assignment
+        selected = sorted(selected, key=lambda r: r.summary["MAE_mean"])
+        log.info(f"\nTop-{k}-per-model selection: {len(selected)} configs total")
+    else:
+        # ── Global top-K (original behaviour) ────────────────────────────────
+        selected = completed[:args.top_k]
+        log.info(f"\nGlobal top-{args.top_k} sweep configs:")
 
     top_k_cfgs = []
-    log.info(f"\nTop-{args.top_k} sweep configs:")
-    for rank, run in enumerate(runs, 1):
+    for rank, run in enumerate(selected, 1):
         cfg = {
             "rank":       rank,
             "method":     run.config.get("method"),
@@ -827,6 +846,7 @@ def main():
         if e["sweep_id"].startswith(args.sweep_id):
             e["topk_comparison"] = {
                 "run_tag":     run_tag,
+                "dataset":     ds_cfg["key"],
                 "ran_at":      datetime.now().isoformat(),
                 "top_k":       args.top_k,
                 "n_samples":   len(indices),

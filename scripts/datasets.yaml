@@ -1,0 +1,12 @@
+active: inverse_crime
+
+datasets:
+  inverse_crime:
+    name: "IC 8-pairs (ray approx)"
+    data_file: "/DL-based-SoS/train-VS-8pairs-IC-081225.mat"
+    notes: "10k samples, ray-approximation forward model"
+
+  kwave:
+    name: "k-Wave simulations"
+    data_file: "/DL-based-SoS/train-kwave-PLACEHOLDER.mat"
+    notes: "Full-wave simulator, out-of-distribution test"

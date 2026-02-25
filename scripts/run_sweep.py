@@ -34,6 +34,7 @@ import sys
 import time
 import inr_sos
 import wandb
+import yaml
 import numpy as np
 from datetime import datetime
 from pathlib import Path
@@ -46,8 +47,24 @@ from inr_sos.evaluation.sweep_agent import run_sweep_agent
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 
-LOG_DIR      = Path(__file__).parent
+LOG_DIR       = Path(__file__).parent
 REGISTRY_FILE = LOG_DIR / "sweep_registry.json"
+SCRIPTS_DIR   = Path(__file__).parent
+
+
+def load_dataset_config(key: str = None) -> dict:
+    """
+    Load dataset path from scripts/datasets.yaml.
+    key overrides the 'active' field (use for --dataset CLI arg).
+    """
+    cfg_path = SCRIPTS_DIR / "datasets.yaml"
+    with open(cfg_path) as f:
+        cfg = yaml.safe_load(f)
+    key = key or cfg["active"]
+    ds = cfg["datasets"][key]
+    ds["key"] = key
+    ds["data_path"] = DATA_DIR + ds["data_file"]
+    return ds
 
 
 def setup_logging(sweep_id: str) -> Path:
@@ -58,7 +75,7 @@ def setup_logging(sweep_id: str) -> Path:
         datefmt="%Y-%m-%d %H:%M:%S",
         handlers=[
             logging.FileHandler(log_path),
-            logging.StreamHandler(sys.stdout),   # also print to tmux pane
+            logging.StreamHandler(sys.stdout),  
         ]
     )
     return log_path
@@ -79,6 +96,8 @@ def update_registry(sweep_id: str, updates: dict):
 
 def main():
     parser = argparse.ArgumentParser()
+    parser.add_argument("--dataset", default=None,
+                    help="Dataset key from datasets.yaml (default: uses 'active' field)")
     parser.add_argument("--sweep_id",  required=True,
                         help="Sweep ID from create_sweep.py")
     parser.add_argument("--n_runs",    default=60, type=int,
@@ -107,10 +126,11 @@ def main():
     })
 
     # ── Load dataset ──────────────────────────────────────────────────────
-    data_file  = DATA_DIR + "/DL-based-SoS/train-VS-8pairs-IC-081225.mat"
     grid_file  = DATA_DIR + "/DL-based-SoS/forward_model_lr/grid_parameters.mat"
 
     log.info("Loading dataset ...")
+    ds_cfg = load_dataset_config(args.dataset)
+    data_file  = ds_cfg["data_path"]
     dataset = USDataset(data_file, grid_file)
     log.info(f"Dataset loaded — {len(dataset)} samples")
 
