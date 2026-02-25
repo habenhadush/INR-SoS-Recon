@@ -100,6 +100,36 @@ def _legend_label(method_str: str) -> str:
     return f"{rank}  {meth} / {model}"
 
 
+def warm_init_weights(model) -> None:
+    """
+    Zero only the output bias so the network predicts s_norm≈0 at step 0.
+
+    Why bias-only (not weight scaling):
+      s_phys = s_norm * s_std + s_mean
+      s_std is tiny (~1e-5 in slowness units), so even with random weights
+      the weight contribution to s_phys is negligible (~±1 m/s).
+      Zeroing the bias removes the systematic offset — that is enough to
+      start at background SoS without touching the weights.
+      Scaling weights by 0.01 would shrink gradients reaching hidden layers
+      by 100x, severely slowing convergence and potentially a false negative.
+
+    Architecture-aware:
+      ReluMLP / FourierMLP  →  final layer is model.net[-1]  (nn.Linear)
+      SirenMLP              →  final layer is model.final     (nn.Linear)
+    """
+    import torch
+    with torch.no_grad():
+        if hasattr(model, "final"):      # SirenMLP
+            model.final.bias.zero_()
+        elif hasattr(model, "net"):      # ReluMLP, FourierMLP
+            model.net[-1].bias.zero_()
+        else:
+            raise AttributeError(
+                f"warm_init_weights: cannot find output layer in {type(model).__name__}. "
+                "Expected model.final (SirenMLP) or model.net[-1] (ReluMLP/FourierMLP)."
+            )
+
+
 def setup_logging(run_tag: str):
     log_path = LOG_DIR / f"{run_tag}.log"
     logger   = logging.getLogger("compare_topk")
@@ -203,7 +233,8 @@ def compute_baseline_metrics(recons, gt, indices, label, log) -> dict:
 # INR runner
 # ─────────────────────────────────────────────────────────────────────────────
 
-def run_inr_config(sweep_cfg, dataset, indices, base_config, run_tag, log) -> dict:
+def run_inr_config(sweep_cfg, dataset, indices, base_config, run_tag, log,
+                   warm_init: bool = False) -> dict:
     from inr_sos.models.mlp import FourierMLP, ReluMLP
     from inr_sos.models.siren import SirenMLP
     from inr_sos.training.engines import (
@@ -252,11 +283,12 @@ def run_inr_config(sweep_cfg, dataset, indices, base_config, run_tag, log) -> di
         project=base_config.project_name,
         name=wb_name,
         group=f"{run_tag}_topk",
-        tags=["topk_comparison", f"rank{rank}", method, mtype, f"n{len(indices)}"],
+        tags=["topk_comparison", f"rank{rank}", method, mtype, f"n{len(indices)}",
+              "warm_init" if warm_init else "cold_init"],
         notes=(f"rank#{rank} | {method}/{mtype} | steps={cfg.steps} | "
                f"lr={cfg.lr:.2e} | tv={cfg.tv_weight:.2e} | n={len(indices)}"),
         config={"rank": rank, "method": method, "model_type": mtype,
-                "n_samples": len(indices), **hparams},
+                "n_samples": len(indices), "warm_init": warm_init, **hparams},
         reinit=True,
     )
 
@@ -271,6 +303,8 @@ def run_inr_config(sweep_cfg, dataset, indices, base_config, run_tag, log) -> di
         if mtype == "FourierMLP": kwargs["scale"] = cfg.scale
         elif mtype == "SirenMLP": kwargs["omega"]  = cfg.omega
         model = model_cls(**kwargs)
+        if warm_init:
+            warm_init_weights(model)
 
         t0 = time.perf_counter()
         result = engine_fn(sample=sample, L_matrix=dataset.L_matrix,
@@ -693,10 +727,13 @@ def main():
     parser.add_argument("--n_samples", default=20, type=int,
                         help="Use 2 for a quick bug check before the overnight run")
     parser.add_argument("--no_wandb",  action="store_true")
+    parser.add_argument("--warm_init", action="store_true",
+                        help="Zero output layer before training so model starts predicting background SoS")
     args = parser.parse_args()
 
-    run_tag      = make_run_tag(f"topk{args.top_k}_fresh{args.n_samples}",
-                                args.sweep_id)
+    init_tag  = "warm" if args.warm_init else "cold"
+    run_tag   = make_run_tag(f"topk{args.top_k}_fresh{args.n_samples}_{init_tag}",
+                             args.sweep_id)
     log_path, log = setup_logging(run_tag)
 
     log.info("=" * 70)
@@ -766,7 +803,8 @@ def main():
     t_start = time.time()
     for cfg in top_k_cfgs:
         t0     = time.time()
-        result = run_inr_config(cfg, dataset, indices, base_config, run_tag, log)
+        result = run_inr_config(cfg, dataset, indices, base_config, run_tag, log,
+                                   warm_init=args.warm_init)
         log.info(f"  rank#{cfg['rank']} wall time: {(time.time()-t0)/60:.1f} min")
         inr_results.append(result)
 
