@@ -3,8 +3,9 @@ from torch.utils.data import Dataset
 import h5py
 import numpy as np
 from pathlib import Path
-from inr_sos.io.utils import load_mat  
-from inr_sos.utils.params import USGrid 
+from scipy.sparse import csc_matrix
+from inr_sos.io.utils import load_mat, load_metadata
+from inr_sos.utils.params import USGrid
 import logging
 
 class USDataset(Dataset):
@@ -64,20 +65,71 @@ class USDataset(Dataset):
             logging.info(f"Loading L-Matrix from data file: {self.data_path}")
             with h5py.File(self.data_path, 'r') as f:
                 if 'A' in f:
-                    logging.info("Loading L-Matrix from data file...")
-                    A_data = np.array(f['A'])
-                    if A_data.shape == (4096, 131072):
-                        A_data = A_data.T
+                    node = f['A']
+                    if isinstance(node, h5py.Group):
+                        # Sparse Group: reconstruct CSC matrix
+                        keys = list(node.keys())
+                        if 'data' in keys and 'ir' in keys and 'jc' in keys:
+                            logging.info("Reconstructing sparse L-Matrix from data file...")
+                            data = node['data'][:]
+                            ir = node['ir'][:]
+                            jc = node['jc'][:]
+                            n_cols = len(jc) - 1
+                            n_rows = int(ir.max()) + 1 if len(ir) > 0 else 0
+                            sparse_A = csc_matrix((data, ir, jc), shape=(n_rows, n_cols))
+                            A_data = sparse_A.toarray()
+                        else:
+                            raise ValueError(f"'A' is a Group but missing sparse keys. Found: {keys}")
+                    else:
+                        # Dense Dataset
+                        logging.info("Loading dense L-Matrix from data file...")
+                        A_data = np.array(node)
+                        if A_data.shape[0] < A_data.shape[1]:
+                            A_data = A_data.T
                     self.L_matrix = torch.tensor(A_data, dtype=torch.float32)
                     logging.info("L-Matrix loaded successfully with shape: {}".format(self.L_matrix.shape))
-
+                elif matrix_path is not None:
+                    logging.info("'A' not in data file, loading from matrix_path: {}".format(matrix_path))
+                    L_data = load_mat(matrix_path)
+                    if 'L' not in L_data:
+                        logging.error("Matrix 'L' not found in the provided matrix file.")
+                    self.L_matrix = torch.tensor(L_data['L'], dtype=torch.float32)
+                    logging.info("L-Matrix loaded successfully with shape: {}".format(self.L_matrix.shape))
                 else:
-                    raise KeyError("Matrix 'A' not found in file and no matrix_path provided.")
-                
-        # 4. GET DATASET LENGTH
+                    logging.warning("Matrix 'A' not found in data file and no matrix_path provided. L_matrix set to None.")
+                    self.L_matrix = None
+
+        # 4. GET DATASET LENGTH & LOAD OPTIONAL FIELDS
         with h5py.File(self.data_path, 'r') as f:
             self.length = f['measmnts'].shape[0]
             logging.info("Dataset initialized with {} samples.".format(self.length))
+
+            # Optional benchmark reconstructions
+            if 'all_slowness_recons_l1' in f:
+                self.benchmarks_l1 = np.array(f['all_slowness_recons_l1']).T if f['all_slowness_recons_l1'].ndim >= 2 else np.array(f['all_slowness_recons_l1'])
+                logging.info(f"L1 benchmarks loaded with shape: {self.benchmarks_l1.shape}")
+            else:
+                self.benchmarks_l1 = None
+
+            if 'all_slowness_recons_l2' in f:
+                self.benchmarks_l2 = np.array(f['all_slowness_recons_l2']).T if f['all_slowness_recons_l2'].ndim >= 2 else np.array(f['all_slowness_recons_l2'])
+                logging.info(f"L2 benchmarks loaded with shape: {self.benchmarks_l2.shape}")
+            else:
+                self.benchmarks_l2 = None
+
+            # Optional correlation vectors
+            if 'all_correlation_vector' in f:
+                self.correlation_vectors = np.array(f['all_correlation_vector']).T if f['all_correlation_vector'].ndim >= 2 else np.array(f['all_correlation_vector'])
+                logging.info(f"Correlation vectors loaded with shape: {self.correlation_vectors.shape}")
+            else:
+                self.correlation_vectors = None
+
+        # 5. LOAD METADATA (bf_sos, pix2time, reg_param, MaskSoS)
+        meta = load_metadata(str(self.data_path))
+        self.bf_sos = meta.get('bf_sos', None)
+        self.pix2time = meta.get('pix2time', None)
+        self.reg_param = meta.get('reg_param', None)
+        self.mask_sos = meta.get('MaskSoS', None)
 
     def _open_h5_file(self):
         """Helper to open HDF5 file for lazy loading."""
@@ -113,16 +165,32 @@ class USDataset(Dataset):
         nan_vals = self.h5_file['nanidx'][idx]
         mask_vec = torch.tensor(1.0 - nan_vals, dtype=torch.float32).unsqueeze(1)
     
-        return {
-            'coords': self.coords_norm, 
-            's_gt_raw': s_vec, 
-            's_gt_normalized': s_normalized,       
-            's_stats': (s_mean, s_std),       
-            'd_meas': d_vec,            
-            'mask': mask_vec,           
-            'L_matrix': self.L_matrix, 
+        sample = {
+            'coords': self.coords_norm,
+            's_gt_raw': s_vec,
+            's_gt_normalized': s_normalized,
+            's_stats': (s_mean, s_std),
+            'd_meas': d_vec,
+            'mask': mask_vec,
+            'L_matrix': self.L_matrix,
             'idx': idx
-        }      
+        }
+
+        # Optional benchmark / correlation fields (additive only)
+        if self.benchmarks_l1 is not None:
+            sample['s_l1_recon'] = torch.tensor(
+                self.benchmarks_l1[idx].flatten(), dtype=torch.float32
+            ).unsqueeze(1)
+        if self.benchmarks_l2 is not None:
+            sample['s_l2_recon'] = torch.tensor(
+                self.benchmarks_l2[idx].flatten(), dtype=torch.float32
+            ).unsqueeze(1)
+        if self.correlation_vectors is not None:
+            sample['correlation'] = torch.tensor(
+                self.correlation_vectors[idx].flatten(), dtype=torch.float32
+            ).unsqueeze(1)
+
+        return sample
 
 
 class RayDataset(Dataset):

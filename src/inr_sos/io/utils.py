@@ -92,34 +92,109 @@ def inspect_mat_fileheader(filepath: str):
             print(f"Error loading file: {e}")
 
 
-def load_ic_batch(filepath, idx):
+def load_sample(filepath, idx):
     """
-    Loads a single sample from 'train-VS-8pairs-IC-081225.mat'
-    Handles the specific reshaping and transposing required for this file.
+    Loads a single sample from an HDF5 data file, returning all available fields.
+
+    Always-present keys:
+        's_gt'       : ndarray (4096,) — ground truth slowness
+        'd_meas'     : ndarray (131072,) — measurements
+        'mask'       : ndarray (131072,) — validity mask (1=valid, 0=invalid)
+
+    Optional keys (present only when the corresponding dataset exists in the file):
+        's_l1_recon'  : ndarray (4096,) — L1 benchmark reconstruction
+        's_l2_recon'  : ndarray (4096,) — L2 benchmark reconstruction
+        'correlation' : ndarray (131072,) — correlation vector
     """
     with h5py.File(filepath, 'r') as f:
-        # 1. Load Ground Truth (Batch, 64, 64) -> Flatten to (4096,)
-        # Note: We take sample 'idx'.
-        s_raw = f['imgs_gt'][idx] # Shape (64, 64)
-        s_vec = s_raw.flatten()   # Shape (4096,)
-        
-        # 2. Load Measurements (Batch, 131072) -> (131072,)
-        d_vec = f['measmnts'][idx] 
-        
-        # 3. Load Mask (Batch, 131072)
-        # 'nanidx': 1 = Invalid/NaN, 0 = Valid
+        s_raw = f['imgs_gt'][idx]
+        s_vec = s_raw.flatten()
+
+        d_vec = f['measmnts'][idx]
+
         nan_vals = f['nanidx'][idx]
-        mask_vec = 1.0 - nan_vals # Invert: 1 = Valid Data
-        
-    return s_vec, d_vec, mask_vec
+        mask_vec = 1.0 - nan_vals
+
+        result = {
+            's_gt': s_vec,
+            'd_meas': d_vec,
+            'mask': mask_vec,
+        }
+
+        if 'all_slowness_recons_l1' in f:
+            result['s_l1_recon'] = f['all_slowness_recons_l1'][idx].flatten()
+        if 'all_slowness_recons_l2' in f:
+            result['s_l2_recon'] = f['all_slowness_recons_l2'][idx].flatten()
+        if 'all_correlation_vector' in f:
+            result['correlation'] = f['all_correlation_vector'][idx].flatten()
+
+    return result
+
+
+def load_ic_batch(filepath, idx):
+    """
+    Backward-compatible wrapper around load_sample().
+    Returns the original 3-tuple (s_vec, d_vec, mask_vec).
+    """
+    sample = load_sample(filepath, idx)
+    return sample['s_gt'], sample['d_meas'], sample['mask']
 
 
 def load_L_matrix(filepath):
     """
-    Loads the A matrix just once (since it's the same for all patients).
+    Loads the A matrix from an HDF5 file, handling three cases:
+      1. Dense Dataset 'A' → read and transpose to (n_measurements, n_pixels)
+      2. Sparse Group 'A' (data/ir/jc) → reconstruct CSC matrix (already correct shape)
+      3. Absent 'A' → return None
     """
     with h5py.File(filepath, 'r') as f:
-        # Shape is (4096, 131072) -> We need (131072, 4096)
-        # We read it and then Transpose (.T)
-        A_matrix = f['A'][:] 
-        return A_matrix.T
+        if 'A' not in f:
+            return None
+
+        node = f['A']
+
+        # Sparse Group: reconstruct CSC matrix
+        if isinstance(node, h5py.Group):
+            keys = list(node.keys())
+            if 'data' in keys and 'ir' in keys and 'jc' in keys:
+                data = node['data'][:]
+                ir = node['ir'][:]
+                jc = node['jc'][:]
+                n_cols = len(jc) - 1
+                n_rows = int(ir.max()) + 1 if len(ir) > 0 else 0
+                sparse_A = csc_matrix((data, ir, jc), shape=(n_rows, n_cols))
+                return sparse_A.toarray()
+            else:
+                raise ValueError(f"'A' is a Group but missing sparse keys (data/ir/jc). Found: {keys}")
+
+        # Dense Dataset: read and transpose if needed
+        A_matrix = np.array(node)
+        if A_matrix.shape[0] < A_matrix.shape[1]:
+            A_matrix = A_matrix.T
+        return A_matrix
+
+
+def load_metadata(filepath):
+    """
+    Extract scalar/small-array metadata from an HDF5 data file.
+
+    Returns a dict with available keys from: 'bf_sos', 'pix2time', 'reg_param', 'MaskSoS'.
+    Missing keys are omitted (caller checks with .get()).
+    """
+    metadata = {}
+    scalar_keys = ['bf_sos', 'pix2time', 'reg_param']
+    array_keys = ['MaskSoS']
+
+    with h5py.File(filepath, 'r') as f:
+        for key in scalar_keys:
+            if key in f:
+                val = np.array(f[key])
+                metadata[key] = float(val.flat[0])
+        for key in array_keys:
+            if key in f:
+                val = np.array(f[key])
+                if val.ndim >= 2:
+                    val = val.T
+                metadata[key] = val
+
+    return metadata
