@@ -214,6 +214,15 @@ def run_grid_comparison(
             # ── Per-(method, model) aggregate logged as config for later query
             _log_combo_aggregate(combo_tag, method_name, model_name, combo_metrics)
 
+    # ── Baseline metrics (if embedded in dataset) ───────────────────────────
+    baseline_rows, baseline_results = _compute_baseline_rows(
+        dataset, target_indices, use_wandb=use_wandb
+    )
+    if baseline_rows:
+        master_rows.extend(baseline_rows)
+        results.update(baseline_results)
+        logging.info(f"Added {len(baseline_results)} baseline method(s) to results.")
+
     # ── Master summary run ───────────────────────────────────────────────────
     agg_stats = _compute_aggregate_stats(results)
     log_to_local_database(base_config, agg_stats["overall"], target_indices)
@@ -222,6 +231,63 @@ def run_grid_comparison(
         _log_master_summary(base_config, master_rows, agg_stats)
 
     return results
+
+
+def _compute_baseline_rows(dataset, target_indices, use_wandb=True):
+    """
+    Compute metrics for embedded L1/L2 baselines if available.
+
+    Returns (rows, results) where rows is a list of dicts for the master table
+    and results is a dict keyed by ("L1_baseline","Classical") etc.
+    """
+    rows = []
+    results = {}
+
+    baselines = []
+    if dataset.benchmarks_l1 is not None:
+        baselines.append(("L1_baseline", "s_l1_recon", dataset.benchmarks_l1))
+    if dataset.benchmarks_l2 is not None:
+        baselines.append(("L2_baseline", "s_l2_recon", dataset.benchmarks_l2))
+
+    for method_label, sample_key, _ in baselines:
+        combo_key = (method_label, "Classical")
+        results[combo_key] = {"MAE": [], "RMSE": [], "SSIM": [], "CNR": []}
+
+        for idx in target_indices:
+            sample = dataset[idx]
+            if sample_key not in sample:
+                continue
+
+            metrics = calculate_metrics(
+                s_phys_pred=sample[sample_key],
+                s_gt_raw=sample["s_gt_raw"],
+                grid_shape=(64, 64),
+            )
+
+            for k in results[combo_key]:
+                results[combo_key][k].append(metrics[k])
+
+            rows.append({
+                "Method":     method_label,
+                "Model":      "Classical",
+                "Sample_Idx": idx,
+                "idx":        idx,       # alias for run_evaluation table format
+                "MAE":        metrics["MAE"],
+                "RMSE":       metrics["RMSE"],
+                "SSIM":       metrics["SSIM"],
+                "CNR":        metrics["CNR"],
+                "Image":      None,
+                "image":      None,      # alias for run_evaluation table format
+            })
+
+            logging.info(
+                f"  [{method_label}_Sample_{idx}] MAE={metrics['MAE']:.3f} "
+                f"RMSE={metrics['RMSE']:.3f} "
+                f"SSIM={metrics['SSIM']:.4f} "
+                f"CNR={metrics['CNR']:.3f}"
+            )
+
+    return rows, results
 
 
 def _log_combo_aggregate(combo_tag, method_name, model_name, combo_metrics):
@@ -430,6 +496,14 @@ def run_evaluation(
 
         logging.info(f"Sample {idx} -> MAE: {metrics['MAE']:.2f} | SSIM: {metrics['SSIM']:.4f}")
 
+    # ── Baseline metrics (if embedded in dataset) ───────────────────────────
+    baseline_rows, baseline_results = _compute_baseline_rows(
+        dataset, target_indices, use_wandb=use_wandb
+    )
+    if baseline_rows:
+        table_rows.extend(baseline_rows)
+        logging.info(f"Added {len(baseline_results)} baseline method(s) to evaluation.")
+
     # ══════════════════════════════════════════════════════════════════════════
     # AGGREGATION
     # ══════════════════════════════════════════════════════════════════════════
@@ -437,6 +511,13 @@ def run_evaluation(
     for key, values in aggregated_metrics.items():
         final_stats[f"{key}_mean"] = float(np.mean(values))
         final_stats[f"{key}_std"]  = float(np.std(values))
+
+    # Add baseline aggregate stats
+    for (method, model), vals in baseline_results.items():
+        for k, v in vals.items():
+            prefix = f"{method}"
+            final_stats[f"{prefix}_{k}_mean"] = float(np.mean(v))
+            final_stats[f"{prefix}_{k}_std"] = float(np.std(v))
 
     # Log to local CSV
     log_to_local_database(config, final_stats, target_indices)

@@ -96,7 +96,12 @@ class USDataset(Dataset):
                     self.L_matrix = torch.tensor(L_data['L'], dtype=torch.float32)
                     logging.info("L-Matrix loaded successfully with shape: {}".format(self.L_matrix.shape))
                 else:
-                    logging.warning("Matrix 'A' not found in data file and no matrix_path provided. L_matrix set to None.")
+                    logging.warning(
+                        "Matrix 'A' not found in data file and no matrix_path provided. "
+                        "L_matrix set to None. Reconstruction engines require an L-matrix "
+                        "and will fail without one. Provide matrix_path pointing to an "
+                        "L.mat file or set use_external_L_matrix=True."
+                    )
                     self.L_matrix = None
 
         # 4. GET DATASET LENGTH & LOAD OPTIONAL FIELDS
@@ -106,20 +111,38 @@ class USDataset(Dataset):
 
             # Optional benchmark reconstructions
             if 'all_slowness_recons_l1' in f:
-                self.benchmarks_l1 = np.array(f['all_slowness_recons_l1']).T if f['all_slowness_recons_l1'].ndim >= 2 else np.array(f['all_slowness_recons_l1'])
+                raw = np.array(f['all_slowness_recons_l1'])
+                if raw.ndim == 3:
+                    self.benchmarks_l1 = raw          # (N, 64, 64) — index with [idx]
+                elif raw.ndim == 2:
+                    self.benchmarks_l1 = raw.T        # MATLAB 2D convention fix
+                else:
+                    self.benchmarks_l1 = raw
                 logging.info(f"L1 benchmarks loaded with shape: {self.benchmarks_l1.shape}")
             else:
                 self.benchmarks_l1 = None
 
             if 'all_slowness_recons_l2' in f:
-                self.benchmarks_l2 = np.array(f['all_slowness_recons_l2']).T if f['all_slowness_recons_l2'].ndim >= 2 else np.array(f['all_slowness_recons_l2'])
+                raw = np.array(f['all_slowness_recons_l2'])
+                if raw.ndim == 3:
+                    self.benchmarks_l2 = raw          # (N, 64, 64) — index with [idx]
+                elif raw.ndim == 2:
+                    self.benchmarks_l2 = raw.T        # MATLAB 2D convention fix
+                else:
+                    self.benchmarks_l2 = raw
                 logging.info(f"L2 benchmarks loaded with shape: {self.benchmarks_l2.shape}")
             else:
                 self.benchmarks_l2 = None
 
             # Optional correlation vectors
             if 'all_correlation_vector' in f:
-                self.correlation_vectors = np.array(f['all_correlation_vector']).T if f['all_correlation_vector'].ndim >= 2 else np.array(f['all_correlation_vector'])
+                raw = np.array(f['all_correlation_vector'])
+                if raw.ndim == 3:
+                    self.correlation_vectors = raw    # (N, 64, 64) — index with [idx]
+                elif raw.ndim == 2:
+                    self.correlation_vectors = raw.T  # MATLAB 2D convention fix
+                else:
+                    self.correlation_vectors = raw
                 logging.info(f"Correlation vectors loaded with shape: {self.correlation_vectors.shape}")
             else:
                 self.correlation_vectors = None

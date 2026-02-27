@@ -4,9 +4,20 @@ datasets:
   inverse_crime:
     name: "IC 8-pairs (ray approx)"
     data_file: "/DL-based-SoS/train-VS-8pairs-IC-081225.mat"
+    has_baselines: false
+    has_A_matrix: true
     notes: "10k samples, ray-approximation forward model"
 
-  kwave:
-    name: "k-Wave simulations"
-    data_file: "/DL-based-SoS/train-kwave-PLACEHOLDER.mat"
-    notes: "Full-wave simulator, out-of-distribution test"
+  kwave_geom:
+    name: "k-Wave Geometry (32 samples)"
+    data_file: "/DL-based-SoS/test_kWaveGeom_l2rec_l1rec_unifiedvar.mat"
+    has_baselines: true
+    has_A_matrix: true
+    notes: "Full-wave, has embedded L1/L2/correlation, sparse A"
+
+  kwave_blob:
+    name: "k-Wave Blob (70 samples)"
+    data_file: "/DL-based-SoS/test_kWaveBlob_final.mat"
+    has_baselines: true
+    has_A_matrix: false
+    notes: "Full-wave, NO A matrix — requires external L from forward_model_lr/"

@@ -5,7 +5,7 @@ compare_baselines.py
 Compares the best INR config against L1 and L2 regularization baselines
 from Bezek et al.'s dataset.
 
-Two modes:
+Three modes:
 
   --use_registry          (fast, no GPU)
       Reads INR results from sweep_registry.json (the 20 holdout samples
@@ -19,6 +19,11 @@ Two modes:
       Computes L1/L2 on the same N samples.
       Use this for the final thesis/paper comparison.
 
+  --embedded              (k-wave / phantom data with embedded baselines)
+      Uses L1/L2 baselines embedded directly in the data file (loaded via
+      USDataset). No separate analytical file needed. Use --dataset to
+      select which k-wave dataset entry from datasets.yaml.
+
 Usage:
     # Quick mode — no GPU needed (~30 seconds)
     python scripts/compare_baselines.py --sweep_id hqt6bwmp --use_registry
@@ -28,6 +33,9 @@ Usage:
 
     # Fresh mode, no W&B
     python scripts/compare_baselines.py --sweep_id hqt6bwmp --fresh_n 50 --no_wandb
+
+    # Embedded mode — k-wave data with embedded baselines
+    python scripts/compare_baselines.py --sweep_id hqt6bwmp --embedded --dataset kwave_geom
 """
 
 import argparse
@@ -109,16 +117,37 @@ def compute_baseline_metrics(recons: np.ndarray,
                               gt: np.ndarray,
                               indices: list,
                               label: str,
-                              log) -> dict:
+                              log,
+                              sample_first: bool = False) -> dict:
     """
     Compute metrics for pre-computed reconstructions.
-    recons / gt: (64, 64, N_total) — MATLAB axis order, sample is last dim.
+
+    Parameters
+    ----------
+    recons : np.ndarray
+        Reconstructions array. Either (64, 64, N) for MATLAB convention
+        (sample_first=False) or (N, 64, 64) for h5py/embedded convention
+        (sample_first=True).
+    gt : np.ndarray
+        Ground truth array, same convention as recons.
+    indices : list
+        Sample indices to evaluate.
+    label : str
+        Method label for logging.
+    log : logger
+        Logger instance.
+    sample_first : bool
+        If True, arrays are (N, 64, 64). If False, (64, 64, N).
     """
     all_mae, all_rmse, all_ssim, all_cnr = [], [], [], []
 
     for idx in indices:
-        s_phys_pred = np.asarray(recons[:, :, idx].flatten(), dtype=np.float32)
-        s_gt_raw    = np.asarray(gt[:, :, idx].flatten(),    dtype=np.float32)
+        if sample_first:
+            s_phys_pred = np.asarray(recons[idx].flatten(), dtype=np.float32)
+            s_gt_raw    = np.asarray(gt[idx].flatten(),     dtype=np.float32)
+        else:
+            s_phys_pred = np.asarray(recons[:, :, idx].flatten(), dtype=np.float32)
+            s_gt_raw    = np.asarray(gt[:, :, idx].flatten(),     dtype=np.float32)
 
         m = calculate_metrics(
             s_phys_pred=s_phys_pred,
@@ -391,16 +420,26 @@ def main():
     parser.add_argument("--fresh_n",      type=int, default=None,
                         help="Sample N fresh disjoint indices and re-run INR (GPU)")
     parser.add_argument("--no_wandb",     action="store_true")
+    parser.add_argument("--embedded",     action="store_true",
+                        help="Use baselines embedded in data file (k-wave datasets)")
+    parser.add_argument("--grid_path",    default=None,
+                        help="Path to grid_parameters.mat (required for --embedded)")
+    parser.add_argument("--matrix_path",  default=None,
+                        help="Path to external L.mat (for datasets without embedded A)")
     args = parser.parse_args()
 
-    if not args.use_registry and args.fresh_n is None:
-        print("ERROR: specify either --use_registry or --fresh_n N")
-        sys.exit(1)
-    if args.use_registry and args.fresh_n is not None:
-        print("ERROR: --use_registry and --fresh_n are mutually exclusive")
-        sys.exit(1)
+    if not args.embedded:
+        if not args.use_registry and args.fresh_n is None:
+            print("ERROR: specify either --use_registry, --fresh_n N, or --embedded")
+            sys.exit(1)
+        if args.use_registry and args.fresh_n is not None:
+            print("ERROR: --use_registry and --fresh_n are mutually exclusive")
+            sys.exit(1)
 
-    mode = "registry" if args.use_registry else f"fresh_{args.fresh_n}"
+    if args.embedded:
+        mode = "embedded"
+    else:
+        mode = "registry" if args.use_registry else f"fresh_{args.fresh_n}"
     log_path, log = setup_logging(args.sweep_id, mode)
 
     log.info("=" * 65)
@@ -409,6 +448,61 @@ def main():
     log.info(f"  Mode    : {mode}")
     log.info(f"  Log     : {log_path}")
     log.info("=" * 65)
+
+    # ── Embedded mode: baselines come from the data file itself ───────────
+    if args.embedded:
+        ds_cfg = load_dataset_config(args.dataset)
+        data_file = DATA_DIR + ds_cfg["data_file"]
+        grid_file = args.grid_path or (DATA_DIR + "/DL-based-SoS/forward_model_lr/grid_parameters.mat")
+
+        log.info(f"Embedded mode: loading dataset from {data_file}")
+        dataset = USDataset(
+            data_file, grid_file,
+            matrix_path=args.matrix_path,
+            use_external_L_matrix=bool(args.matrix_path),
+        )
+
+        if dataset.benchmarks_l1 is None and dataset.benchmarks_l2 is None:
+            log.error("No embedded baselines found in data file. Cannot use --embedded mode.")
+            sys.exit(1)
+
+        n_samples = len(dataset)
+        indices = list(range(n_samples))
+        log.info(f"Evaluating all {n_samples} embedded samples")
+
+        # Load ground truth in sample-first order (N, 64, 64)
+        import h5py
+        with h5py.File(data_file, 'r') as f:
+            gt_embedded = np.array(f['imgs_gt'])  # (N, 64, 64) from h5py
+        log.info(f"Ground truth loaded with shape: {gt_embedded.shape}")
+
+        all_results = []
+
+        if dataset.benchmarks_l2 is not None:
+            log.info("Computing embedded L2 baseline metrics ...")
+            l2_results = compute_baseline_metrics(
+                dataset.benchmarks_l2, gt_embedded, indices,
+                "L2_regularization", log, sample_first=True,
+            )
+            all_results.append(l2_results)
+
+        if dataset.benchmarks_l1 is not None:
+            log.info("Computing embedded L1 baseline metrics ...")
+            l1_results = compute_baseline_metrics(
+                dataset.benchmarks_l1, gt_embedded, indices,
+                "L1_regularization", log, sample_first=True,
+            )
+            all_results.append(l1_results)
+
+        print_comparison_table(all_results, log)
+
+        if not args.no_wandb:
+            registry, entry = load_registry(args.sweep_id)
+            log.info("\nLogging to W&B ...")
+            log_to_wandb(all_results, entry, indices, mode)
+
+        log.info(f"\n  Log: {log_path}")
+        return
 
     registry, entry = load_registry(args.sweep_id)
 
