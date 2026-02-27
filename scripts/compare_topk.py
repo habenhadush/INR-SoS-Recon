@@ -17,7 +17,7 @@ Outputs:
 
 Usage:
     # 2-sample bug check (~8 min)
-    python scripts/compare_topk.py --sweep_id hqt6bwmp --n_samples 2
+    python scripts/compare_topk.py --sweep_id hqt6bwmp --n_samples 2 --warm_init --job_name name
 
     # overnight job
     python scripts/compare_topk.py --sweep_id hqt6bwmp --n_samples 20
@@ -239,7 +239,7 @@ def compute_baseline_metrics(recons, gt, indices, label, log) -> dict:
 
 # INR runner
 def run_inr_config(sweep_cfg, dataset, indices, base_config, run_tag, log,
-                   warm_init: bool = False) -> dict:
+                   warm_init: bool = False, wb_group=None) -> dict:
     from inr_sos.models.mlp import FourierMLP, ReluMLP
     from inr_sos.models.siren import SirenMLP
     from inr_sos.training.engines import (
@@ -287,7 +287,7 @@ def run_inr_config(sweep_cfg, dataset, indices, base_config, run_tag, log,
     wandb.init(
         project=base_config.project_name,
         name=wb_name,
-        group=f"{run_tag}_topk",
+        group=wb_group or f"{run_tag}_topk",
         tags=["topk_comparison", f"rank{rank}", method, mtype, f"n{len(indices)}",
               "warm_init" if warm_init else "cold_init"],
         notes=(f"rank#{rank} | {method}/{mtype} | steps={cfg.steps} | "
@@ -650,7 +650,7 @@ def make_reconstruction_grid(all_results: list,
 
 
 # W&B summary run
-def log_summary_to_wandb(all_results, entry, indices, run_tag, sweep_id, log):
+def log_summary_to_wandb(all_results, entry, indices, run_tag, sweep_id, log, wb_group=None):
     wb_name = f"{run_tag}_SUMMARY"
     log.info(f"\n  Logging summary → W&B '{wb_name}'")
 
@@ -658,7 +658,7 @@ def log_summary_to_wandb(all_results, entry, indices, run_tag, sweep_id, log):
         project=entry["project"],
         entity=entry["entity"],
         name=wb_name,
-        group=f"{run_tag}_topk",
+        group=wb_group or f"{run_tag}_topk",
         tags=["topk_comparison", "summary", f"n{len(indices)}"],
         notes=(f"Top-K comparison summary. sweep={sweep_id} | "
                f"n_samples={len(indices)} | indices={indices}"),
@@ -711,24 +711,37 @@ def log_summary_to_wandb(all_results, entry, indices, run_tag, sweep_id, log):
 
 def main():
     parser = argparse.ArgumentParser()
+
     parser.add_argument("--dataset", default=None,
                     help="Dataset key from datasets.yaml (default: uses 'active' field)")
+    
     parser.add_argument("--sweep_id",  required=True)
+
     parser.add_argument("--top_k",     default=5,  type=int)
+
     parser.add_argument("--n_samples", default=20, type=int,
                         help="Use 2 for a quick bug check before the overnight run")
     parser.add_argument("--no_wandb",  action="store_true")
+
     parser.add_argument("--warm_init", action="store_true",
                         help="Zero output layer before training so model starts predicting background SoS")
+    
     parser.add_argument("--top_k_per_model", default=None, type=int,
                         help="If set, fetch top-K runs per model type (FourierMLP/ReluMLP/SirenMLP) "
                              "instead of global top-K. Overrides --top_k for config selection only.")
+    
+    parser.add_argument("--job_name", default=None,
+                    help="Human-readable name for this job (e.g. 'ic_warm_20samp'). "
+                         "All W&B runs from this submission are grouped under this name. "
+                         "If omitted, run_tag is used.")
+ 
     args = parser.parse_args()
 
     init_tag  = "warm" if args.warm_init else "cold"
     sel_tag   = f"top{args.top_k_per_model}permodel" if args.top_k_per_model else f"topk{args.top_k}"
     run_tag   = make_run_tag(f"{sel_tag}_fresh{args.n_samples}_{init_tag}",
                              args.sweep_id)
+    wb_group = args.job_name if args.job_name else run_tag
     log_path, log = setup_logging(run_tag)
 
     log.info("=" * 70)
@@ -756,6 +769,7 @@ def main():
     analytical = inr_sos.load_mat(
         DATA_DIR + "/DL-based-SoS/train_IC_10k_l2rec_l1rec_imcon.mat"
     )
+    
     l2_result = compute_baseline_metrics(
         analytical["all_slowness_recons_l2"], analytical["imgs_gt"],
         indices, "L2_regularization", log)
@@ -823,7 +837,7 @@ def main():
     for cfg in top_k_cfgs:
         t0     = time.time()
         result = run_inr_config(cfg, dataset, indices, base_config, run_tag, log,
-                                   warm_init=args.warm_init)
+                                   warm_init=args.warm_init, wb_group=wb_group)
         log.info(f"  rank#{cfg['rank']} wall time: {(time.time()-t0)/60:.1f} min")
         inr_results.append(result)
 
@@ -837,7 +851,7 @@ def main():
     # ── W&B summary ───────────────────────────────────────────────────────
     if not args.no_wandb:
         log_summary_to_wandb(all_results, entry, indices, run_tag,
-                             args.sweep_id, log)
+                             args.sweep_id, log, wb_group=wb_group)
 
     # ── Registry ──────────────────────────────────────────────────────────
     slim_results = [{k: v for k, v in r.items() if k != "per_sample"}

@@ -1,4 +1,4 @@
-active: inverse_crime
+active: kwave_geom
 
 datasets:
   inverse_crime:

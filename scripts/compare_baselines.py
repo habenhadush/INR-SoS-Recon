@@ -364,12 +364,12 @@ def print_comparison_table(all_results: list, log):
                          f"({pct:+.1f}% {sign})")
 
 
-def log_to_wandb(all_results: list, entry: dict, indices: list, mode: str):
+def log_to_wandb(all_results: list, entry: dict, indices: list, mode: str, wb_group=None):
     run = wandb.init(
         project=entry["project"],
         entity=entry["entity"],
         name=f"baseline_comparison_{mode}",
-        group="baseline_comparison",
+        group=wb_group or "baseline_comparison",
         tags=["comparison", "baseline", "l1", "l2", "inr", mode],
         config={
             "sweep_id": entry["sweep_id"],
@@ -426,8 +426,11 @@ def main():
                         help="Path to grid_parameters.mat (required for --embedded)")
     parser.add_argument("--matrix_path",  default=None,
                         help="Path to external L.mat (for datasets without embedded A)")
+    parser.add_argument("--job_name", default=None,
+                    help="Human-readable name for this job (e.g. 'ic_warm_20samp'). "
+                         "All W&B runs from this submission are grouped under this name. "
+                         "If omitted, run_tag is used.")
     args = parser.parse_args()
-
     if not args.embedded:
         if not args.use_registry and args.fresh_n is None:
             print("ERROR: specify either --use_registry, --fresh_n N, or --embedded")
@@ -441,6 +444,8 @@ def main():
     else:
         mode = "registry" if args.use_registry else f"fresh_{args.fresh_n}"
     log_path, log = setup_logging(args.sweep_id, mode)
+
+    wb_group = args.job_name if args.job_name else f"baseline_comparison_{mode}"
 
     log.info("=" * 65)
     log.info(f"  Baseline comparison")
@@ -499,7 +504,7 @@ def main():
         if not args.no_wandb:
             registry, entry = load_registry(args.sweep_id)
             log.info("\nLogging to W&B ...")
-            log_to_wandb(all_results, entry, indices, mode)
+            log_to_wandb(all_results, entry, indices, mode, wb_group=wb_group)
 
         log.info(f"\n  Log: {log_path}")
         return
