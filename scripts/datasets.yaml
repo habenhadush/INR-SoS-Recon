@@ -20,4 +20,5 @@ datasets:
     data_file: "/DL-based-SoS/test_kWaveBlob_final.mat"
     has_baselines: true
     has_A_matrix: false
+    matrix_file: "/DL-based-SoS/forward_model_lr/L.mat"
     notes: "Full-wave, NO A matrix — requires external L from forward_model_lr/"

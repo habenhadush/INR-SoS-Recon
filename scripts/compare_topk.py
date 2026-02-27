@@ -237,6 +237,35 @@ def compute_baseline_metrics(recons, gt, indices, label, log) -> dict:
     return result
 
 
+def compute_embedded_baseline_metrics(dataset, indices, label, sample_key, log) -> dict:
+    """
+    Compute baseline metrics using embedded baselines from USDataset.
+    Uses dataset[idx] which handles axis ordering automatically.
+    Stores s_phys_np and s_gt_np in per_sample for reconstruction grid.
+    """
+    mae, rmse, ssim, cnr, per_sample = [], [], [], [], []
+    for idx in indices:
+        sample = dataset[idx]
+        if sample_key not in sample:
+            log.warning(f"  {label}: sample {idx} missing '{sample_key}', skipping")
+            continue
+        s_pred = sample[sample_key].squeeze().numpy().astype(np.float32)
+        s_gt   = sample['s_gt_raw'].squeeze().numpy().astype(np.float32)
+        m = calculate_metrics(s_phys_pred=s_pred, s_gt_raw=s_gt,
+                              grid_shape=(64, 64))
+        mae.append(m["MAE"]); rmse.append(m["RMSE"])
+        ssim.append(m["SSIM"]); cnr.append(m["CNR"])
+        per_sample.append({
+            "idx":       idx,
+            "s_phys_np": s_pred.flatten(),
+            "s_gt_np":   s_gt.flatten(),
+            **m
+        })
+    result = _aggregate(label, mae, rmse, ssim, cnr, [], per_sample)
+    _log_agg(log, result)
+    return result
+
+
 # INR runner
 def run_inr_config(sweep_cfg, dataset, indices, base_config, run_tag, log,
                    warm_init: bool = False, wb_group=None) -> dict:
@@ -413,12 +442,14 @@ def make_boxplots(all_results: list) -> plt.Figure:
     n       = all_results[0]["n_samples"]
     use_box = n >= 5
 
-    # Colors: grey for baselines, blue gradient for INR
-    colors = ["#aaaaaa", "#888888"] + [
+    # Colors: grey shades for baselines, blue gradient for INR
+    baseline_greys     = ["#aaaaaa", "#888888", "#666666", "#555555"][:len(baselines)]
+    baseline_dot_greys = ["#666666", "#444444", "#333333", "#222222"][:len(baselines)]
+    colors = baseline_greys + [
         plt.cm.Blues(0.35 + 0.13 * i) for i in range(len(inr_ranks))
     ]
     # Darker versions for strip plot dots
-    dot_colors = ["#666666", "#444444"] + [
+    dot_colors = baseline_dot_greys + [
         plt.cm.Blues(0.55 + 0.12 * i) for i in range(len(inr_ranks))
     ]
 
@@ -719,8 +750,9 @@ def main():
 
     parser.add_argument("--top_k",     default=5,  type=int)
 
-    parser.add_argument("--n_samples", default=20, type=int,
-                        help="Use 2 for a quick bug check before the overnight run")
+    parser.add_argument("--n_samples", default=None, type=int,
+                        help="Number of samples to evaluate (default: all samples in dataset). "
+                             "Use 2 for a quick bug check.")
     parser.add_argument("--no_wandb",  action="store_true")
 
     parser.add_argument("--warm_init", action="store_true",
@@ -737,9 +769,22 @@ def main():
  
     args = parser.parse_args()
 
+    # ── Load dataset FIRST (needed for n_samples resolution) ──────────────
+    ds_cfg    = load_dataset_config(args.dataset)
+    grid_path = DATA_DIR + "/DL-based-SoS/forward_model_lr/grid_parameters.mat"
+    ds_kwargs = {}
+    if not ds_cfg.get("has_A_matrix", True):
+        matrix_file = ds_cfg.get("matrix_file", "/DL-based-SoS/forward_model_lr/L.mat")
+        ds_kwargs["matrix_path"] = DATA_DIR + matrix_file
+        ds_kwargs["use_external_L_matrix"] = True
+    dataset = USDataset(ds_cfg["data_path"], grid_path, **ds_kwargs)
+
+    # ── Resolve n_samples ─────────────────────────────────────────────────
+    n_samples = args.n_samples if args.n_samples is not None else len(dataset)
+
     init_tag  = "warm" if args.warm_init else "cold"
     sel_tag   = f"top{args.top_k_per_model}permodel" if args.top_k_per_model else f"topk{args.top_k}"
-    run_tag   = make_run_tag(f"{sel_tag}_fresh{args.n_samples}_{init_tag}",
+    run_tag   = make_run_tag(f"{sel_tag}_fresh{n_samples}_{init_tag}",
                              args.sweep_id)
     wb_group = args.job_name if args.job_name else run_tag
     log_path, log = setup_logging(run_tag)
@@ -747,10 +792,10 @@ def main():
     log.info("=" * 70)
     log.info(f"  Top-K comparison  |  {run_tag}")
     log.info(f"  Sweep    : {args.sweep_id}")
-    log.info(f"  Top-K    : {args.top_k}  |  Samples: {args.n_samples}")
-    est = args.top_k * args.n_samples * 20
+    log.info(f"  Dataset  : {ds_cfg['name']}  ({ds_cfg['key']})")
+    log.info(f"  Top-K    : {args.top_k}  |  Samples: {n_samples} / {len(dataset)} available")
     n_configs_est = (args.top_k_per_model * 3) if args.top_k_per_model else args.top_k
-    est = n_configs_est * args.n_samples * 20
+    est = n_configs_est * n_samples * 20
     log.info(f"  Est. time: ~{est//60}h{est%60:02d}m  (20 min/sample, {n_configs_est} configs)")
     log.info("=" * 70)
 
@@ -760,31 +805,37 @@ def main():
     used    = get_used_indices(entry)
     log.info(f"Previously used: {len(used)} indices — excluded")
     rng     = np.random.default_rng(seed=3141)
-    pool    = [i for i in range(10000) if i not in used]
-    indices = rng.choice(pool, size=args.n_samples, replace=False).tolist()
+    pool    = [i for i in range(len(dataset)) if i not in used]
+    if n_samples > len(pool):
+        log.warning(f"Requested {n_samples} samples but only {len(pool)} available "
+                    f"(excluding {len(used)} used). Using all available.")
+        n_samples = len(pool)
+    indices = rng.choice(pool, size=n_samples, replace=False).tolist()
     log.info(f"Fresh indices ({len(indices)}): {indices}")
 
     # ── Baselines ─────────────────────────────────────────────────────────
-    log.info("\nLoading analytical baselines ...")
-    analytical = inr_sos.load_mat(
-        DATA_DIR + "/DL-based-SoS/train_IC_10k_l2rec_l1rec_imcon.mat"
-    )
-    
-    l2_result = compute_baseline_metrics(
-        analytical["all_slowness_recons_l2"], analytical["imgs_gt"],
-        indices, "L2_regularization", log)
-    l1_result = compute_baseline_metrics(
-        analytical["all_slowness_recons_l1"], analytical["imgs_gt"],
-        indices, "L1_regularization", log)
+    baseline_results = []
+    if ds_cfg.get("has_baselines"):
+        log.info("\nComputing embedded baselines from dataset ...")
+        if dataset.benchmarks_l2 is not None:
+            baseline_results.append(compute_embedded_baseline_metrics(
+                dataset, indices, "L2_regularization", "s_l2_recon", log))
+        if dataset.benchmarks_l1 is not None:
+            baseline_results.append(compute_embedded_baseline_metrics(
+                dataset, indices, "L1_regularization", "s_l1_recon", log))
+    else:
+        log.info("\nLoading analytical baselines ...")
+        analytical = inr_sos.load_mat(
+            DATA_DIR + "/DL-based-SoS/train_IC_10k_l2rec_l1rec_imcon.mat"
+        )
+        baseline_results.append(compute_baseline_metrics(
+            analytical["all_slowness_recons_l2"], analytical["imgs_gt"],
+            indices, "L2_regularization", log))
+        baseline_results.append(compute_baseline_metrics(
+            analytical["all_slowness_recons_l1"], analytical["imgs_gt"],
+            indices, "L1_regularization", log))
 
-    # ── Dataset ───────────────────────────────────────────────────────────
-    log.info("\nLoading dataset ...")
-    ds_cfg = load_dataset_config(args.dataset)
-    log.info(f"Dataset: {ds_cfg['name']}  ({ds_cfg['key']})")
-    dataset     = USDataset(
-        ds_cfg["data_path"],
-        DATA_DIR + "/DL-based-SoS/forward_model_lr/grid_parameters.mat"
-    )
+    # ── Dataset config ────────────────────────────────────────────────────
     base_config = ExperimentConfig(project_name=entry["project"])
 
     # ── Fetch configs from W&B ───────────────────────────────────────────
@@ -845,7 +896,7 @@ def main():
     log.info(f"\nAll configs done in {total_hrs:.2f} hours")
 
     # ── Final table ───────────────────────────────────────────────────────
-    all_results = [l2_result, l1_result] + inr_results
+    all_results = baseline_results + inr_results
     print_table(all_results, log)
 
     # ── W&B summary ───────────────────────────────────────────────────────
