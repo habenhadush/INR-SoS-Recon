@@ -295,6 +295,11 @@ def run_inr_config(sweep_cfg, dataset, indices, base_config, run_tag, log,
     log.info(f"  W&B run: {wb_name}")
 
     cfg = copy.deepcopy(base_config)
+    if hasattr(dataset, 'pix2time') and dataset.pix2time is not None:
+        cfg.time_scale = 1.0 / dataset.pix2time
+        log.info(f"  time_scale set from pix2time: {cfg.time_scale:.4e}")
+    else:
+        log.info(f"  time_scale using default: {cfg.time_scale:.4e}")
     cfg.model_type      = mtype
     cfg.hidden_features = hparams.get("hidden_features", cfg.hidden_features)
     cfg.hidden_layers   = hparams.get("hidden_layers",   cfg.hidden_layers)

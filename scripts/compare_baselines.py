@@ -217,6 +217,11 @@ def run_inr_fresh(best_cfg_entry: dict,
     log.info(f"  Running on {len(indices)} fresh samples ...")
 
     cfg = copy.deepcopy(base_config)
+    if hasattr(dataset, 'pix2time') and dataset.pix2time is not None:
+        cfg.time_scale = 1.0 / dataset.pix2time
+        log.info(f"  time_scale set from pix2time: {cfg.time_scale:.4e}")
+    else:
+        log.info(f"  time_scale using default: {cfg.time_scale:.4e}")
     cfg.model_type      = model_type
     cfg.hidden_features = hparams.get("hidden_features", cfg.hidden_features)
     cfg.hidden_layers   = hparams.get("hidden_layers",   cfg.hidden_layers)

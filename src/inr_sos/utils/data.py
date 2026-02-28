@@ -185,6 +185,10 @@ class USDataset(Dataset):
         
         # B. Load Measurements and Mask
         d_vec = torch.tensor(self.h5_file['measmnts'][idx], dtype=torch.float32).unsqueeze(1)
+
+        # issue with k-wave data: some entries are NaN due to non-physical paths. We provide a mask to ignore these during training.
+        d_vec = torch.nan_to_num(d_vec, nan=0.0)  # Replace NaNs with 0 for stability
+        
         nan_vals = self.h5_file['nanidx'][idx]
         mask_vec = torch.tensor(1.0 - nan_vals, dtype=torch.float32).unsqueeze(1)
     
