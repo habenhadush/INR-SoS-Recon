@@ -1,10 +1,92 @@
 import numpy as np
+import torch
 from skimage.metrics import structural_similarity as ssim
 from skimage.filters import threshold_otsu
 import warnings
 
 _SOS_MIN = 1200.0
 _SOS_MAX = 1800.0
+
+
+def compute_model_error_floor(sample, L_matrix, time_scale=1e6):
+    """Compute the irreducible forward-model residual ||L @ s_true - d_meas||.
+
+    Even with a perfect reconstruction of the slowness field, the ray-based
+    L-matrix does not perfectly reproduce k-wave measurements.  This function
+    quantifies that mismatch so it can be compared against the training loss.
+
+    Args:
+        sample:   dict with keys 's_gt_raw' (flat slowness, shape (4096,) or
+                  (4096,1)), 'd_meas' (shape (131072,) or (131072,1)), and
+                  'mask' (same shape as d_meas, 1=valid ray).
+        L_matrix: forward-model matrix, shape (131072, 4096).  May be a torch
+                  tensor or numpy array.
+        time_scale: multiplier applied to the residual before computing
+                    statistics (default 1e6 converts seconds -> microseconds).
+
+    Returns:
+        dict with:
+            floor_mse   - mean squared residual over valid rays (scaled)
+            floor_rmse  - root-mean-square residual (scaled)
+            floor_mae   - mean absolute residual (scaled)
+            pct_nan_rays - percentage of rays masked out (invalid)
+            n_valid_rays - number of valid rays used
+    """
+    # ------------------------------------------------------------------
+    # Convert everything to numpy for simplicity (this is a diagnostic,
+    # not a training-loop call, so numpy is fine).
+    # ------------------------------------------------------------------
+    def _to_np(x):
+        if isinstance(x, torch.Tensor):
+            return x.detach().cpu().numpy()
+        return np.asarray(x)
+
+    s_gt  = _to_np(sample['s_gt_raw']).flatten()
+    d_meas = _to_np(sample['d_meas']).flatten()
+    mask   = _to_np(sample['mask']).flatten()
+
+    if isinstance(L_matrix, torch.Tensor):
+        # Sparse tensors need .to_dense() first
+        if L_matrix.is_sparse:
+            L_np = L_matrix.to_dense().cpu().numpy()
+        else:
+            L_np = L_matrix.cpu().numpy()
+    else:
+        L_np = np.asarray(L_matrix)
+
+    # Forward model prediction using ground truth
+    d_pred = L_np @ s_gt                       # (131072,)
+    residual = (d_pred - d_meas) * mask        # zero out invalid rays
+
+    # Scale to the units used during training
+    residual_scaled = residual * time_scale
+
+    n_total = len(mask)
+    n_valid = mask.sum()
+    pct_nan = 100.0 * (1.0 - n_valid / n_total) if n_total > 0 else 0.0
+
+    if n_valid < 1:
+        return {
+            "floor_mse":    0.0,
+            "floor_rmse":   0.0,
+            "floor_mae":    0.0,
+            "pct_nan_rays": pct_nan,
+            "n_valid_rays": 0,
+        }
+
+    valid_residual = residual_scaled[mask > 0.5]
+
+    floor_mse  = float(np.mean(valid_residual ** 2))
+    floor_rmse = float(np.sqrt(floor_mse))
+    floor_mae  = float(np.mean(np.abs(valid_residual)))
+
+    return {
+        "floor_mse":    floor_mse,
+        "floor_rmse":   floor_rmse,
+        "floor_mae":    floor_mae,
+        "pct_nan_rays": float(pct_nan),
+        "n_valid_rays": int(n_valid),
+    }
 
 
 def calculate_cnr(s_phys_pred, s_gt_raw):

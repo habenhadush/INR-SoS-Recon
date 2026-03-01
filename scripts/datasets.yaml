@@ -7,6 +7,23 @@ datasets:
     has_baselines: false
     has_A_matrix: true
     notes: "10k samples, ray-approximation forward model"
+    sweep:
+      n_eval_samples: 10
+      time_scale: 1e6
+      parameters:
+        method: ["Full_Matrix", "Sequential_SGD", "Ray_Batching"]
+        model_type: ["FourierMLP", "ReluMLP", "SirenMLP"]
+        hidden_features: [128, 256, 512]
+        hidden_layers: [2, 3, 4, 5]
+        lr: {distribution: "log_uniform_values", min: 1e-5, max: 1e-3}
+        steps: [1000, 2000, 3000]
+        tv_weight: {distribution: "log_uniform_values", min: 1e-6, max: 1e-2}
+        reg_weight: {distribution: "log_uniform_values", min: 1e-6, max: 1e-2}
+        mapping_size: [32, 64, 128, 256]
+        scale: {distribution: "uniform", min: 0.1, max: 20.0}
+        omega: {distribution: "uniform", min: 10.0, max: 60.0}
+        epochs: [100, 150, 200]
+        batch_size: [2048, 4096, 8192]
 
   kwave_geom:
     name: "k-Wave Geometry (32 samples)"
@@ -14,6 +31,29 @@ datasets:
     has_baselines: true
     has_A_matrix: true
     notes: "Full-wave, has embedded L1/L2/correlation, sparse A"
+    sweep:
+      n_eval_samples: 12
+      time_scale: "auto"
+      parameters:
+        method: ["Full_Matrix", "Sequential_SGD"]
+        model_type: ["FourierMLP", "ReluMLP", "SirenMLP"]
+        hidden_features: [128, 256, 512]
+        hidden_layers: [2, 3, 4, 5]
+        lr: {distribution: "log_uniform_values", min: 1e-6, max: 1e-3}
+        steps: [200, 500, 750, 1000]
+        tv_weight: {distribution: "log_uniform_values", min: 1e-3, max: 1.0}
+        reg_weight: {distribution: "log_uniform_values", min: 1e-4, max: 1e-1}
+        loss_type: ["mse", "huber"]
+        huber_delta: {distribution: "log_uniform_values", min: 0.01, max: 2.0}
+        clamp_slowness: [true, false]
+        early_stopping: [true]
+        patience: [50, 100, 200]
+        mapping_size: [32, 64, 128]
+        scale: {distribution: "uniform", min: 0.1, max: 5.0}
+        omega: {distribution: "uniform", min: 10.0, max: 60.0}
+        epochs: [100, 150, 200]
+        batch_size: [2048, 4096, 8192]
+        time_scale: [1e6, 2e7]
 
   kwave_blob:
     name: "k-Wave Blob (70 samples)"
@@ -22,3 +62,26 @@ datasets:
     has_A_matrix: false
     matrix_file: "/DL-based-SoS/forward_model_lr/L.mat"
     notes: "Full-wave, NO A matrix — requires external L from forward_model_lr/"
+    sweep:
+      n_eval_samples: 12
+      time_scale: "auto"
+      parameters:
+        method: ["Full_Matrix", "Sequential_SGD"]
+        model_type: ["FourierMLP", "ReluMLP", "SirenMLP"]
+        hidden_features: [128, 256, 512]
+        hidden_layers: [2, 3, 4, 5]
+        lr: {distribution: "log_uniform_values", min: 1e-6, max: 1e-3}
+        steps: [200, 500, 750, 1000]
+        tv_weight: {distribution: "log_uniform_values", min: 1e-3, max: 1.0}
+        reg_weight: {distribution: "log_uniform_values", min: 1e-4, max: 1e-1}
+        loss_type: ["mse", "huber"]
+        huber_delta: {distribution: "log_uniform_values", min: 0.01, max: 2.0}
+        clamp_slowness: [true, false]
+        early_stopping: [true]
+        patience: [50, 100, 200]
+        mapping_size: [32, 64, 128]
+        scale: {distribution: "uniform", min: 0.1, max: 5.0}
+        omega: {distribution: "uniform", min: 10.0, max: 60.0}
+        epochs: [100, 150, 200]
+        batch_size: [2048, 4096, 8192]
+        time_scale: [1e6, 2e7]

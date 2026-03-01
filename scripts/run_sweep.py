@@ -1,16 +1,16 @@
 #!/usr/bin/env python3
 """
-run_sweep.py
-------------
-Run this inside a tmux session. Survives SSH disconnects.
-Logs every trial result to  sweep_<ID>.log  and updates sweep_registry.json.
+run_sweep.py  (data-driven)
+----------------------------
+Reads sweep config from datasets.yaml — no code changes needed per domain.
 
 Workflow:
     # 1. Create a tmux session
     tmux new -s sweep_<first6ofID>
 
     # 2. Inside tmux, launch this script
-    python run_sweep.py --sweep_id <ID> --n_runs 60
+    python run_sweep.py --sweep_id <ID> --n_runs 100
+    python run_sweep.py --sweep_id <ID> --n_runs 100 --dataset kwave_geom
 
     # 3. Detach (keep it running)
     Ctrl+B  then  D
@@ -23,7 +23,8 @@ Workflow:
 
 Usage:
     python run_sweep.py --sweep_id abc123 --n_runs 60
-    python run_sweep.py --sweep_id abc123 --n_runs 60 --indices 8052 7863 2923 1042 5501
+    python run_sweep.py --sweep_id abc123 --n_runs 100 --dataset kwave_geom
+    python run_sweep.py --sweep_id abc123 --n_runs 60 --indices 0 5 10 15 20 25
 """
 
 import argparse
@@ -54,7 +55,7 @@ SCRIPTS_DIR   = Path(__file__).parent
 
 def load_dataset_config(key: str = None) -> dict:
     """
-    Load dataset path from scripts/datasets.yaml.
+    Load dataset config from scripts/datasets.yaml.
     key overrides the 'active' field (use for --dataset CLI arg).
     """
     cfg_path = SCRIPTS_DIR / "datasets.yaml"
@@ -67,6 +68,14 @@ def load_dataset_config(key: str = None) -> dict:
     return ds
 
 
+def compute_auto_time_scale(data_path: str) -> float:
+    """Compute time_scale from pix2time in the data file."""
+    import h5py
+    with h5py.File(data_path, 'r') as f:
+        pix2time = float(np.array(f['pix2time']).flat[0])
+    return 1.0 / pix2time
+
+
 def setup_logging(sweep_id: str) -> Path:
     log_path = LOG_DIR / f"sweep_{sweep_id}.log"
     logging.basicConfig(
@@ -75,7 +84,7 @@ def setup_logging(sweep_id: str) -> Path:
         datefmt="%Y-%m-%d %H:%M:%S",
         handlers=[
             logging.FileHandler(log_path),
-            logging.StreamHandler(sys.stdout),  
+            logging.StreamHandler(sys.stdout),
         ]
     )
     return log_path
@@ -100,11 +109,11 @@ def main():
                     help="Dataset key from datasets.yaml (default: uses 'active' field)")
     parser.add_argument("--sweep_id",  required=True,
                         help="Sweep ID from create_sweep.py")
-    parser.add_argument("--n_runs",    default=60, type=int,
+    parser.add_argument("--n_runs",    default=100, type=int,
                         help="Total Bayesian trials")
     parser.add_argument("--indices",   nargs="+", type=int, default=None,
                         help="Dataset sample indices to evaluate on. "
-                             "If omitted, 10 random indices are chosen.")
+                             "If omitted, n_eval_samples random indices are chosen.")
     parser.add_argument("--project",   default="INR-SoS-Recon")
     args = parser.parse_args()
 
@@ -125,13 +134,36 @@ def main():
         "log_file":   str(log_path),
     })
 
+    # ── Load dataset config from yaml ─────────────────────────────────────
+    ds_cfg = load_dataset_config(args.dataset)
+    data_file = ds_cfg["data_path"]
+    sweep_section = ds_cfg.get("sweep", {})
+    n_eval_samples = sweep_section.get("n_eval_samples", 10)
+    yaml_time_scale = sweep_section.get("time_scale", 1e6)
+
+    log.info(f"Dataset     : {ds_cfg['name']} ({ds_cfg['key']})")
+    log.info(f"Data file   : {data_file}")
+
+    # ── Compute time_scale ────────────────────────────────────────────────
+    if yaml_time_scale == "auto":
+        auto_ts = compute_auto_time_scale(data_file)
+        log.info(f"time_scale  : auto → {auto_ts:.2e} (from pix2time)")
+        base_time_scale = auto_ts
+    else:
+        base_time_scale = float(yaml_time_scale)
+        log.info(f"time_scale  : {base_time_scale:.2e} (from yaml)")
+
     # ── Load dataset ──────────────────────────────────────────────────────
-    grid_file  = DATA_DIR + "/DL-based-SoS/forward_model_lr/grid_parameters.mat"
+    grid_file = DATA_DIR + "/DL-based-SoS/forward_model_lr/grid_parameters.mat"
 
     log.info("Loading dataset ...")
-    ds_cfg = load_dataset_config(args.dataset)
-    data_file  = ds_cfg["data_path"]
-    dataset = USDataset(data_file, grid_file)
+    # Handle datasets without embedded A matrix
+    if not ds_cfg.get("has_A_matrix", True) and "matrix_file" in ds_cfg:
+        matrix_path = DATA_DIR + ds_cfg["matrix_file"]
+        log.info(f"External L  : {matrix_path}")
+        dataset = USDataset(data_file, grid_file, matrix_path=matrix_path)
+    else:
+        dataset = USDataset(data_file, grid_file)
     log.info(f"Dataset loaded — {len(dataset)} samples")
 
     # ── Sample indices ────────────────────────────────────────────────────
@@ -139,26 +171,20 @@ def main():
         indices = args.indices
     else:
         np.random.seed(42)   # reproducible default
-        indices = np.random.choice(len(dataset), size=10, replace=False).tolist()
+        n_samples = min(n_eval_samples, len(dataset))
+        indices = np.random.choice(len(dataset), size=n_samples, replace=False).tolist()
 
-    log.info(f"Evaluating on indices: {indices}")
-    update_registry(args.sweep_id, {"indices": indices})
+    log.info(f"Eval samples: {len(indices)} indices = {indices}")
+    update_registry(args.sweep_id, {
+        "indices": indices,
+        "dataset": ds_cfg["key"],
+    })
 
-    # ── Base config ───────────────────────────────────────────────────────
+    # ── Base config (minimal — sweep overrides everything) ────────────────
     base_config = ExperimentConfig(
         project_name="INR-SoS-Recon",
         in_features=2,
-        hidden_features=256,
-        hidden_layers=3,
-        mapping_size=64,
-        scale=0.6,
-        omega=30.0,
-        lr=1e-4,
-        steps=2000,
-        epochs=150,
-        batch_size=4096,
-        tv_weight=0.0,
-        reg_weight=0.0,
+        time_scale=base_time_scale,
     )
 
     # ── Read entity/project from registry (set by create_sweep.py) ───────
@@ -169,7 +195,7 @@ def main():
     reg_entry = next(
         (e for e in registry if e["sweep_id"] == args.sweep_id), {}
     )
-    entity  = reg_entry.get("entity")   # e.g. "habenhadush-uppsala-universitet"
+    entity  = reg_entry.get("entity")
     project = reg_entry.get("project", args.project)
     log.info(f"Entity  : {entity}")
     log.info(f"Project : {project}")

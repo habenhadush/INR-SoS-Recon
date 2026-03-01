@@ -1,5 +1,7 @@
+import copy
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 import torch.optim as optim
 import matplotlib.pyplot as plt
 import numpy as np
@@ -19,6 +21,136 @@ logging.basicConfig(
     handlers=[logging.StreamHandler(sys.stdout)],
 )
 _DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+# ---------------------------------------------------------------------------
+#  Physical slowness bounds (s/m)
+# ---------------------------------------------------------------------------
+_SLOWNESS_MIN = 1.0 / 1800.0   # fastest tissue  ~5.56e-4
+_SLOWNESS_MAX = 1.0 / 1200.0   # slowest tissue  ~8.33e-4
+
+
+def _compute_data_loss(residual_seconds, mask, config):
+    """Compute data-fidelity loss with switchable MSE / Huber.
+
+    Args:
+        residual_seconds: (d_pred - d_meas) in seconds, NOT yet masked.
+        mask:             binary mask (1 = valid ray).
+        config:           ExperimentConfig instance.
+
+    Returns:
+        Scalar loss tensor (mean over valid rays).
+    """
+    # Apply mask FIRST, then scale
+    residual_masked = residual_seconds * mask
+    residual_scaled = residual_masked * config.time_scale
+
+    n_valid = mask.sum() + 1e-8
+
+    if config.loss_type == "huber":
+        # F.huber_loss with reduction='sum' then normalise manually
+        target = torch.zeros_like(residual_scaled)
+        loss = F.huber_loss(
+            residual_scaled, target,
+            delta=config.huber_delta,
+            reduction="sum",
+        ) / n_valid
+    else:
+        # Default: MSE (matches original behaviour)
+        loss = (residual_scaled ** 2).sum() / n_valid
+
+    return loss
+
+
+def _maybe_clamp_slowness(s_phys, config):
+    """Optionally clamp slowness to physical bounds."""
+    if config.clamp_slowness:
+        return s_phys.clamp(min=_SLOWNESS_MIN, max=_SLOWNESS_MAX)
+    return s_phys
+
+
+class _EarlyStopper:
+    """Lightweight early-stopping tracker.
+
+    Splits valid ray indices into train/val sets and tracks validation loss.
+    When no improvement is seen for ``patience`` evaluation cycles, signals
+    that training should stop.
+    """
+
+    def __init__(self, mask, config, model):
+        """
+        Args:
+            mask:   1-D binary tensor on device (1 = valid ray).
+            config: ExperimentConfig.
+            model:  the INR model (used to snapshot best weights).
+        """
+        self.enabled = config.early_stopping
+        if not self.enabled:
+            self.train_idx = None
+            self.val_idx = None
+            return
+
+        valid_idx = torch.where(mask.flatten() > 0.5)[0]
+        n_val = max(1, int(len(valid_idx) * config.val_fraction))
+        perm = valid_idx[torch.randperm(len(valid_idx), device=valid_idx.device)]
+        self.val_idx = perm[:n_val]
+        self.train_idx = perm[n_val:]
+
+        # Build train/val masks (same shape as original mask)
+        self.train_mask = torch.zeros_like(mask)
+        self.train_mask[self.train_idx] = 1.0
+        self.val_mask = torch.zeros_like(mask)
+        self.val_mask[self.val_idx] = 1.0
+
+        self.patience = config.patience
+        self.best_val_loss = float("inf")
+        self.wait = 0
+        self.best_state = copy.deepcopy(model.state_dict())
+
+    def get_train_mask(self, original_mask):
+        """Return the training-only mask (or original if ES disabled)."""
+        if not self.enabled:
+            return original_mask
+        return self.train_mask
+
+    def evaluate(self, residual_seconds, config, model):
+        """Compute val loss and update patience counter.
+
+        Returns:
+            (val_loss_value, should_stop)
+        """
+        if not self.enabled:
+            return None, False
+
+        residual_val = residual_seconds * self.val_mask
+        residual_val_scaled = residual_val * config.time_scale
+        n_val = self.val_mask.sum() + 1e-8
+
+        if config.loss_type == "huber":
+            val_loss = F.huber_loss(
+                residual_val_scaled,
+                torch.zeros_like(residual_val_scaled),
+                delta=config.huber_delta,
+                reduction="sum",
+            ) / n_val
+        else:
+            val_loss = (residual_val_scaled ** 2).sum() / n_val
+
+        val_loss_val = val_loss.item()
+
+        if val_loss_val < self.best_val_loss:
+            self.best_val_loss = val_loss_val
+            self.wait = 0
+            self.best_state = copy.deepcopy(model.state_dict())
+        else:
+            self.wait += 1
+
+        return val_loss_val, self.wait >= self.patience
+
+    def restore_best(self, model):
+        """Load the best model weights (no-op if ES disabled)."""
+        if self.enabled:
+            model.load_state_dict(self.best_state)
+
 
 def plot(result_dict, sample, grid_shape=(64, 64), title="Reconstruction"):
     """
@@ -251,7 +383,10 @@ def optimize_direct_supervision(sample, L_matrix, model, label, config: ec, use_
 
 
 def optimize_full_forward_operator(sample, L_matrix, model, label, config: ec, use_wandb=False):
-    """Phase 1: Full-matrix reconstruction."""
+    """Phase 1: Full-matrix reconstruction.
+
+    Supports: Huber/MSE loss, slowness clamping, early stopping.
+    """
     logging.info(f"\n--- {inspect.currentframe().f_code.co_name}: Training {label} (full-matrix) on {_DEVICE} ---")
 
     model  = model.to(_DEVICE)
@@ -265,6 +400,10 @@ def optimize_full_forward_operator(sample, L_matrix, model, label, config: ec, u
     optimizer = optim.Adam(model.parameters(), lr=config.lr)
     scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=config.steps)
 
+    # Early stopping setup
+    stopper = _EarlyStopper(mask, config, model)
+    train_mask = stopper.get_train_mask(mask)
+
     loss_history = []
     pbar = tqdm(range(config.steps))
 
@@ -274,11 +413,11 @@ def optimize_full_forward_operator(sample, L_matrix, model, label, config: ec, u
         optimizer.zero_grad()
 
         s_norm = model(coords)
-        s_phys = s_norm * s_std + s_mean
+        s_phys = _maybe_clamp_slowness(s_norm * s_std + s_mean, config)
 
         d_pred_seconds   = L @ s_phys
-        residual_seconds = (d_pred_seconds - d_meas) * mask
-        loss = ((residual_seconds * config.time_scale) ** 2).sum() / (mask.sum() + 1e-8)
+        residual_seconds = d_pred_seconds - d_meas
+        loss = _compute_data_loss(residual_seconds, train_mask, config)
 
         reg_loss = 0
         if config.reg_weight > 0:
@@ -299,6 +438,16 @@ def optimize_full_forward_operator(sample, L_matrix, model, label, config: ec, u
         if step % 50 == 0:
             pbar.set_description(f"Loss (us^2): {loss.item():.4f}")
 
+        # Early stopping evaluation
+        if stopper.enabled and step % config.log_interval == 0:
+            with torch.no_grad():
+                val_loss, should_stop = stopper.evaluate(residual_seconds.detach(), config, model)
+            if use_wandb and val_loss is not None:
+                wandb.log({"Val Loss": val_loss}, step=step)
+            if should_stop:
+                logging.info(f"Early stopping at step {step} (patience={config.patience})")
+                break
+
         if use_wandb:
             wandb.log({
                 "Total Loss":    total_loss.item(),
@@ -306,11 +455,13 @@ def optimize_full_forward_operator(sample, L_matrix, model, label, config: ec, u
                 "Learning Rate": scheduler.get_last_lr()[0]
             }, step=step)
 
-    # ── FIX: eval mode for final inference ──────────────────────────────────
+    # Restore best model if early stopping was used
+    stopper.restore_best(model)
+
     model.eval()
     with torch.no_grad():
         s_norm = model(coords)
-        s_phys = s_norm * s_std + s_mean
+        s_phys = _maybe_clamp_slowness(s_norm * s_std + s_mean, config)
 
     return {
         's_phys':       s_phys.detach().cpu(),
@@ -321,7 +472,11 @@ def optimize_full_forward_operator(sample, L_matrix, model, label, config: ec, u
 
 
 def optimize_sequential_views(sample, L_matrix, model, label, config: ec, use_wandb=False):
-    """Phase 2b: Pair-by-pair reconstruction."""
+    """Phase 2b: Pair-by-pair reconstruction.
+
+    Supports: Huber/MSE loss, slowness clamping, early stopping.
+    Early stopping uses the *full* residual (all pairs) evaluated every log_interval.
+    """
     logging.info(f"\n--- {inspect.currentframe().f_code.co_name}: Training {label} (Pair-by-Pair) on {_DEVICE} ---")
 
     model  = model.to(_DEVICE)
@@ -337,6 +492,14 @@ def optimize_sequential_views(sample, L_matrix, model, label, config: ec, use_wa
     L_pairs   = [L[k * pair_size:(k + 1) * pair_size, :] for k in range(n_pairs)]
     d_pairs   = [d_meas[k * pair_size:(k + 1) * pair_size] for k in range(n_pairs)]
     m_pairs   = [mask[k * pair_size:(k + 1) * pair_size]   for k in range(n_pairs)]
+
+    # Early stopping operates on the full residual
+    stopper = _EarlyStopper(mask, config, model)
+    # Per-pair train masks (sliced from the full train mask)
+    if stopper.enabled:
+        train_m_pairs = [stopper.train_mask[k * pair_size:(k + 1) * pair_size] for k in range(n_pairs)]
+    else:
+        train_m_pairs = m_pairs
 
     optimizer = optim.Adam(model.parameters(), lr=config.lr)
     scheduler = optim.lr_scheduler.CosineAnnealingLR(
@@ -355,11 +518,11 @@ def optimize_sequential_views(sample, L_matrix, model, label, config: ec, use_wa
             model.train()
             optimizer.zero_grad()
             s_norm = model(coords)
-            s_phys = s_norm * s_std + s_mean
+            s_phys = _maybe_clamp_slowness(s_norm * s_std + s_mean, config)
 
             d_pred_k   = L_pairs[k] @ s_phys
-            residual_k = (d_pred_k - d_pairs[k]) * m_pairs[k]
-            loss_k     = ((residual_k * config.time_scale) ** 2).sum() / (m_pairs[k].sum() + 1e-8)
+            residual_k = d_pred_k - d_pairs[k]
+            loss_k     = _compute_data_loss(residual_k, train_m_pairs[k], config)
 
             reg_loss = 0
             if config.reg_weight > 0:
@@ -382,16 +545,32 @@ def optimize_sequential_views(sample, L_matrix, model, label, config: ec, use_wa
         if step % 50 == 0:
             pbar.set_description(f"Loss (us^2): {avg_loss:.4f}")
 
+        # Early stopping: evaluate on full residual
+        if stopper.enabled and step % config.log_interval == 0:
+            with torch.no_grad():
+                s_norm_es = model(coords)
+                s_phys_es = _maybe_clamp_slowness(s_norm_es * s_std + s_mean, config)
+                d_pred_full = L @ s_phys_es
+                residual_full = d_pred_full - d_meas
+                val_loss, should_stop = stopper.evaluate(residual_full, config, model)
+            if use_wandb and val_loss is not None:
+                wandb.log({"Val Loss": val_loss}, step=step)
+            if should_stop:
+                logging.info(f"Early stopping at step {step} (patience={config.patience})")
+                break
+
         if use_wandb:
             wandb.log({
                 "Avg Pair Loss": avg_loss,
                 "Learning Rate": scheduler.get_last_lr()[0]
             }, step=step)
 
+    stopper.restore_best(model)
+
     model.eval()
     with torch.no_grad():
         s_norm = model(coords)
-        s_phys = s_norm * s_std + s_mean
+        s_phys = _maybe_clamp_slowness(s_norm * s_std + s_mean, config)
 
     return {
         's_phys':       s_phys.detach().cpu(),
@@ -402,7 +581,11 @@ def optimize_sequential_views(sample, L_matrix, model, label, config: ec, use_wa
 
 
 def optimize_stochastic_ray_batching(sample, L_matrix, model, label, config: ec, use_wandb=False):
-    """Phase 3: Fast GPU Slicing."""
+    """Phase 3: Fast GPU Slicing.
+
+    Supports: Huber/MSE loss, slowness clamping, early stopping.
+    Early stopping evaluates at the end of each epoch on a held-out ray set.
+    """
     logging.info(f"\n--- {inspect.currentframe().f_code.co_name}: Training {label} (Fast GPU Slicing) on {_DEVICE} ---")
 
     model  = model.to(_DEVICE)
@@ -419,6 +602,10 @@ def optimize_stochastic_ray_batching(sample, L_matrix, model, label, config: ec,
 
     optimizer = optim.Adam(model.parameters(), lr=config.lr)
     scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=total_steps, eta_min=1e-6)
+
+    # Early stopping setup
+    stopper = _EarlyStopper(mask, config, model)
+    train_mask = stopper.get_train_mask(mask)
 
     loss_history = []
     pbar = tqdm(range(config.epochs), desc="Epochs")
@@ -438,13 +625,13 @@ def optimize_stochastic_ray_batching(sample, L_matrix, model, label, config: ec,
 
             L_batch   = L[batch_idx]
             d_batch   = d_meas[batch_idx]
-            m_batch   = mask[batch_idx]
+            m_batch   = train_mask[batch_idx]
 
             s_norm  = model(coords)
-            s_phys  = s_norm * s_std + s_mean
+            s_phys  = _maybe_clamp_slowness(s_norm * s_std + s_mean, config)
             d_pred  = L_batch @ s_phys
-            residual = (d_pred - d_batch) * m_batch
-            loss_data = ((residual * config.time_scale) ** 2).sum() / (m_batch.sum() + 1e-8)
+            residual = d_pred - d_batch
+            loss_data = _compute_data_loss(residual, m_batch, config)
 
             reg_loss = 0
             if config.reg_weight > 0:
@@ -468,16 +655,32 @@ def optimize_stochastic_ray_batching(sample, L_matrix, model, label, config: ec,
         if epoch % config.log_interval == 0:
             pbar.set_description(f"Avg Loss (us^2): {avg_epoch_loss:.4f}")
 
+        # Early stopping: evaluate full residual at end of epoch
+        if stopper.enabled and epoch % config.log_interval == 0:
+            with torch.no_grad():
+                s_norm_es = model(coords)
+                s_phys_es = _maybe_clamp_slowness(s_norm_es * s_std + s_mean, config)
+                d_pred_full = L @ s_phys_es
+                residual_full = d_pred_full - d_meas
+                val_loss, should_stop = stopper.evaluate(residual_full, config, model)
+            if use_wandb and val_loss is not None:
+                wandb.log({"Val Loss": val_loss}, step=epoch)
+            if should_stop:
+                logging.info(f"Early stopping at epoch {epoch} (patience={config.patience})")
+                break
+
         if use_wandb:
             wandb.log({
                 "Avg Epoch Loss": avg_epoch_loss,
                 "Learning Rate":  scheduler.get_last_lr()[0]
             }, step=epoch)
 
+    stopper.restore_best(model)
+
     model.eval()
     with torch.no_grad():
         s_norm = model(coords)
-        s_phys = s_norm * s_std + s_mean
+        s_phys = _maybe_clamp_slowness(s_norm * s_std + s_mean, config)
 
     return {
         's_phys':       s_phys.detach().cpu(),

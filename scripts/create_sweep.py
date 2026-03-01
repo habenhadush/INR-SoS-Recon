@@ -5,29 +5,41 @@ bootstrap a new sweep and log it in the registry
 
 Usage:
     python create_sweep.py
-    python create_sweep.py --project INR-SoS-Recon --n_runs 60
+    python create_sweep.py --dataset kwave_geom --n_runs 100
+    python create_sweep.py --dataset inverse_crime --n_runs 60
 """
 
 import argparse
 import json
 import os
 import sys
+import yaml
 import wandb
 from datetime import datetime
 from pathlib import Path
 from inr_sos.evaluation.sweep_agent import get_sweep_config
 
-_LOG_FILE = Path(__file__).parent / "sweep_registry.json"
+_LOG_FILE    = Path(__file__).parent / "sweep_registry.json"
+_DATASETS    = Path(__file__).parent / "datasets.yaml"
 
 def main():
     parser = argparse.ArgumentParser()
+    parser.add_argument("--dataset",   default=None,
+                        help="Dataset key from datasets.yaml (default: uses 'active' field)")
     parser.add_argument("--project",   default="INR-SoS-Recon")
-    parser.add_argument("--n_runs",    default=60,  type=int)
+    parser.add_argument("--n_runs",    default=100, type=int)
     parser.add_argument("--metric",    default="MAE_mean")
     parser.add_argument("--direction", default="minimize")
     args = parser.parse_args()
 
+    # Resolve dataset key
+    with open(_DATASETS) as f:
+        ds_yaml = yaml.safe_load(f)
+    dataset_key = args.dataset or ds_yaml["active"]
+    dataset_name = ds_yaml["datasets"][dataset_key]["name"]
+
     cfg = get_sweep_config(
+        dataset_key=dataset_key,
         metric_goal=args.metric,
         metric_direction=args.direction,
     )
@@ -41,11 +53,12 @@ def main():
         "sweep_id":   sweep_id,
         "project":    args.project,
         "entity":     entity,
+        "dataset":    dataset_key,
         "n_runs":     args.n_runs,
         "metric":     args.metric,
         "direction":  args.direction,
         "created_at": datetime.now().isoformat(),
-        "status":     "created",   # created → running → done / failed
+        "status":     "created",
         "url":        url,
         "log_file":   str(Path(__file__).parent / f"sweep_{sweep_id}.log"),
     }
@@ -63,6 +76,7 @@ def main():
     print("\n" + "═" * 60)
     print(f"  Sweep created successfully")
     print(f"  ID      : {sweep_id}")
+    print(f"  Dataset : {dataset_name} ({dataset_key})")
     print(f"  Project : {args.project}")
     print(f"  N runs  : {args.n_runs}")
     print(f"  URL     : {url}")
@@ -70,7 +84,7 @@ def main():
     print("═" * 60)
     print(f"\nNext step — launch the agent in tmux:")
     print(f"\n  tmux new -s sweep_{sweep_id[:6]}")
-    print(f"  python run_sweep.py --sweep_id {sweep_id} --n_runs {args.n_runs}")
+    print(f"  python run_sweep.py --sweep_id {sweep_id} --n_runs {args.n_runs} --dataset {dataset_key}")
     print(f"  # Then Ctrl+B D to detach")
     print(f"\nCheck progress anytime:")
     print(f"  python check_sweep.py")

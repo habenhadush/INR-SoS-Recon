@@ -26,6 +26,9 @@ import matplotlib
 import matplotlib.pyplot as plt
 import matplotlib.colors as mcolors
 import numpy as np
+import matplotlib.patches as mpatches
+import matplotlib.gridspec as gridspec
+matplotlib.use("Agg")
 
 # ─────────────────────────────────────────────────────────────────────────────
 # SoS constants
@@ -261,3 +264,357 @@ def _add_bg_line_to_colorbar(cb, bg_sos, v_min, v_max):
     cb.ax.axhline(y=pos, color="white", linewidth=1.5, linestyle="--")
     cb.ax.text(1.1, pos, f"{bg_sos:.0f}", transform=cb.ax.transAxes,
                fontsize=7, va="center", color="gray")
+    
+
+# ── Colour palette (matches reference image pastels) ─────────────────────────
+# Order: baselines first, then INR ranks in blue gradient
+_PALETTE = {
+    # Baseline colours (matching the reference: gold, cyan, green, red, purple, brown)
+    0: "#f5c842",   # gold / amber   → L2
+    1: "#6dd6e8",   # cyan           → L1
+    2: "#6dc96d",   # green          → Uncorrected (if present)
+    3: "#e87575",   # salmon/red     → Artifact Corrected
+    4: "#b57be8",   # purple         → Data Corrected
+    5: "#a05050",   # brown/dark red → Dual Corrected
+}
+_INR_BLUE_START = 0.35   # starting shade in Blues colormap for INR ranks
+
+
+def _short_label(method_str: str) -> str:
+    """Short x-axis tick label."""
+    if method_str == "L2_regularization":
+        return "L2"
+    if method_str == "L1_regularization":
+        return "L1"
+    parts = method_str.replace("INR_", "").split("_")
+    return parts[0]
+
+
+def _legend_label(method_str: str) -> str:
+    """Full descriptive label for legend."""
+    if method_str == "L2_regularization":
+        return "L2 regularization"
+    if method_str == "L1_regularization":
+        return "L1 regularization"
+    parts = method_str.replace("INR_", "").split("_")
+    rank  = parts[0]
+    model = parts[-1]
+    meth  = "_".join(parts[1:-1])
+    return f"{rank}  {meth} / {model}"
+
+
+def _build_color_lists(baselines, inr_ranks):
+    """
+    Assign one face-colour per method.
+    Baselines get palette entries; INR ranks get a blue gradient.
+    Returns (face_colors, edge_colors) lists aligned with (baselines + inr_ranks).
+    """
+    face_colors = []
+    edge_colors = []
+
+    for i, _ in enumerate(baselines):
+        fc = _PALETTE.get(i, "#aaaaaa")
+        face_colors.append(fc)
+        edge_colors.append(_darken(fc, 0.65))
+
+    n_inr = len(inr_ranks)
+    for i in range(n_inr):
+        shade = _INR_BLUE_START + 0.15 * i
+        fc = plt.cm.Blues(min(shade, 0.92))
+        face_colors.append(fc)
+        ec = plt.cm.Blues(min(shade + 0.25, 0.99))
+        edge_colors.append(ec)
+
+    return face_colors, edge_colors
+
+
+def _darken(hex_color, factor=0.7):
+    """Return a darker version of a hex colour string."""
+    import matplotlib.colors as mc
+    try:
+        rgb = mc.to_rgb(hex_color)
+    except ValueError:
+        return hex_color
+    return tuple(c * factor for c in rgb)
+
+
+def _draw_violin_panel(ax, values_list, face_colors, edge_colors,
+                        labels, ylabel, higher_better, n_samples):
+    """
+    Draw one panel with the reference-style violin + inner box + whiskers.
+
+    Parameters
+    ----------
+    ax           : matplotlib Axes
+    values_list  : list of 1D arrays, one per method (x-position order)
+    face_colors  : list of colours matching values_list
+    edge_colors  : list of edge colours matching values_list
+    labels       : x-tick labels
+    ylabel       : y-axis label string
+    higher_better: bool — controls direction annotation
+    n_samples    : int — used to decide strip vs violin
+    """
+    n = len(values_list)
+    positions = np.arange(1, n + 1)
+
+    # ── Choose plot type ──────────────────────────────────────────────────
+    use_violin = n_samples >= 5
+
+    if use_violin:
+        # ── Violin bodies ─────────────────────────────────────────────────
+        parts = ax.violinplot(
+            values_list,
+            positions=positions,
+            widths=0.55,
+            showmeans=False,
+            showmedians=False,
+            showextrema=False,        # we draw our own whiskers
+        )
+        for i, pc in enumerate(parts["bodies"]):
+            pc.set_facecolor(face_colors[i])
+            pc.set_edgecolor(edge_colors[i])
+            pc.set_alpha(0.55)
+            pc.set_linewidth(1.2)
+
+        # ── Inner box + whiskers (drawn on top of violin) ─────────────────
+        # Use a thin, pale-blue box identical to the reference image
+        bp = ax.boxplot(
+            values_list,
+            positions=positions,
+            widths=0.10,              # very narrow inner box
+            patch_artist=True,
+            notch=False,
+            showfliers=False,         # outliers hidden inside violin
+            medianprops=dict(color="black", linewidth=2.5, solid_capstyle="round"),
+            boxprops=dict(facecolor="white", edgecolor="#4d9ed8",
+                          linewidth=1.4, alpha=0.90),
+            whiskerprops=dict(color="#4d9ed8", linewidth=1.3,
+                              linestyle="-"),
+            capprops=dict(color="#4d9ed8", linewidth=1.3),
+        )
+
+    else:
+        # ── Strip plot for small n (< 5) ──────────────────────────────────
+        rng = np.random.default_rng(seed=0)
+        for col_i, (vals, fc, ec) in enumerate(
+                zip(values_list, face_colors, edge_colors), start=1):
+            jitter = rng.uniform(-0.12, 0.12, size=len(vals))
+            ax.scatter(col_i + jitter, vals,
+                       color=fc, edgecolors=ec, s=60,
+                       zorder=3, alpha=0.85, linewidths=0.7)
+            mean_v = float(np.mean(vals))
+            std_v  = float(np.std(vals))
+            ax.plot([col_i - 0.28, col_i + 0.28],
+                    [mean_v, mean_v], color="black",
+                    linewidth=2.5, zorder=4)
+            ax.plot([col_i, col_i],
+                    [mean_v - std_v, mean_v + std_v],
+                    color="black", linewidth=1.3, zorder=4)
+
+    # ── Axes styling ──────────────────────────────────────────────────────
+    ax.set_xticks(positions)
+    ax.set_xticklabels(labels, fontsize=9)
+    ax.set_ylabel(ylabel, fontsize=10, labelpad=6)
+    ax.tick_params(axis="y", labelsize=8)
+
+    # Horizontal grid lines (matches reference)
+    ax.yaxis.grid(True, linestyle="-", linewidth=0.5,
+                  color="#cccccc", alpha=0.8, zorder=0)
+    ax.set_axisbelow(True)
+
+    # Clean spines
+    ax.spines["top"].set_visible(False)
+    ax.spines["right"].set_visible(False)
+    ax.spines["left"].set_linewidth(1.2)
+    ax.spines["bottom"].set_linewidth(1.2)
+
+    # Direction annotation
+    direction = "Higher ↑ better" if higher_better else "Lower ↓ better"
+    ax.set_title(direction, fontsize=8.5, color="#666666", pad=4)
+
+    # ── x-tick styling — small black ticks like reference ─────────────────
+    ax.tick_params(axis="x", length=4, width=1.2, color="black")
+
+    # Light blue shading over INR region (subtle)
+    n_baseline = len(face_colors) - sum(
+        1 for i, fc in enumerate(face_colors) if fc not in list(_PALETTE.values())
+    )
+    # Simpler: count methods before the blue gradient begins
+    inr_start = None
+    for i, fc in enumerate(face_colors):
+        if fc not in list(_PALETTE.values()):
+            inr_start = i + 1   # 1-based position
+            break
+    if inr_start is not None and inr_start <= n:
+        ax.axvspan(inr_start - 0.5, n + 0.5,
+                   alpha=0.04, color="#1f77b4", zorder=0)
+
+    return ax
+
+
+def make_boxplots(all_results: list,
+                  left_metric: tuple = ("RMSE", "RMSE (m/s)", False),
+                  right_metric: tuple = ("SSIM", "SSIM", True),
+                  title: str = "Method Comparison",
+                  figsize: tuple = (13, 6)) -> plt.Figure:
+    """
+    Two-panel violin+box plot matching the reference image style.
+
+    Parameters
+    ----------
+    all_results   : list of result dicts (same format as compare_topk.py)
+    left_metric   : (key, ylabel, higher_better) for left panel  — default RMSE
+    right_metric  : (key, ylabel, higher_better) for right panel — default SSIM
+    title         : figure suptitle
+    figsize       : figure size in inches
+
+    Returns
+    -------
+    matplotlib Figure
+    """
+    # ── Order: baselines then INR sorted by rank ──────────────────────────
+    baselines = [r for r in all_results if "INR" not in r["method"]]
+    inr_ranks = sorted(
+        [r for r in all_results if "INR" in r["method"]],
+        key=lambda x: int(x["method"].split("rank")[1].split("_")[0])
+        if "rank" in x["method"] else 999,
+    )
+    ordered = baselines + inr_ranks
+    labels  = [_short_label(r["method"]) for r in ordered]
+    n       = all_results[0]["n_samples"]
+
+    face_colors, edge_colors = _build_color_lists(baselines, inr_ranks)
+
+    # ── Build per-method value arrays ─────────────────────────────────────
+    def _get_values(metric_key):
+        out = []
+        for r in ordered:
+            vals = [s.get(metric_key) for s in r["per_sample"]
+                    if s.get(metric_key) is not None]
+            out.append(np.array(vals) if vals else np.array([0.0]))
+        return out
+
+    # ── Figure layout — two panels side by side ───────────────────────────
+    fig = plt.figure(figsize=figsize, facecolor="white")
+    gs  = gridspec.GridSpec(
+        1, 2,
+        figure=fig,
+        wspace=0.35,
+        left=0.08, right=0.72,   # leave room for legend on right
+    )
+
+    ax_l = fig.add_subplot(gs[0, 0])
+    ax_r = fig.add_subplot(gs[0, 1])
+
+    for ax, (metric_key, ylabel, higher) in [
+        (ax_l, left_metric),
+        (ax_r, right_metric),
+    ]:
+        _draw_violin_panel(
+            ax=ax,
+            values_list=_get_values(metric_key),
+            face_colors=face_colors,
+            edge_colors=edge_colors,
+            labels=labels,
+            ylabel=ylabel,
+            higher_better=higher,
+            n_samples=n,
+        )
+
+    # ── Suptitle ──────────────────────────────────────────────────────────
+    fig.suptitle(title, fontsize=13, fontweight="bold", y=1.02)
+
+    # ── Legend — positioned to the right of both panels ──────────────────
+    legend_handles = [
+        mpatches.Patch(facecolor=fc, edgecolor=ec, linewidth=0.8,
+                       label=_legend_label(r["method"]))
+        for r, fc, ec in zip(ordered, face_colors, edge_colors)
+    ]
+    fig.legend(
+        handles=legend_handles,
+        loc="center left",
+        bbox_to_anchor=(0.73, 0.50),
+        fontsize=9,
+        frameon=True,
+        framealpha=0.9,
+        edgecolor="#cccccc",
+        title="Methods",
+        title_fontsize=8.5,
+    )
+
+    return fig
+
+
+def make_boxplots_4panel(all_results: list,
+                          title: str = "Method Comparison",
+                          figsize: tuple = (16, 10)) -> plt.Figure:
+    """
+    4-panel violin+box plot: MAE | RMSE (top row) and SSIM | CNR (bottom row).
+    Retains the same visual style as make_boxplots() (2-panel).
+    """
+    baselines  = [r for r in all_results if "INR" not in r["method"]]
+    inr_ranks  = sorted(
+        [r for r in all_results if "INR" in r["method"]],
+        key=lambda x: int(x["method"].split("rank")[1].split("_")[0])
+        if "rank" in x["method"] else 999,
+    )
+    ordered = baselines + inr_ranks
+    labels  = [_short_label(r["method"]) for r in ordered]
+    n       = all_results[0]["n_samples"]
+    face_colors, edge_colors = _build_color_lists(baselines, inr_ranks)
+
+    def _get_values(metric_key):
+        out = []
+        for r in ordered:
+            vals = [s.get(metric_key) for s in r["per_sample"]
+                    if s.get(metric_key) is not None]
+            out.append(np.array(vals) if vals else np.array([0.0]))
+        return out
+
+    panels = [
+        ("MAE",  "MAE (m/s)",               False),
+        ("RMSE", "RMSE (m/s)",              False),
+        ("SSIM", "SSIM",                    True),
+        ("CNR",  "Contrast-to-Noise Ratio", True),
+    ]
+
+    fig = plt.figure(figsize=figsize, facecolor="white")
+    gs  = gridspec.GridSpec(
+        2, 2, figure=fig,
+        hspace=0.45, wspace=0.35,
+        left=0.07, right=0.72,
+    )
+
+    for idx, (metric_key, ylabel, higher) in enumerate(panels):
+        ax = fig.add_subplot(gs[idx // 2, idx % 2])
+        _draw_violin_panel(
+            ax=ax,
+            values_list=_get_values(metric_key),
+            face_colors=face_colors,
+            edge_colors=edge_colors,
+            labels=labels,
+            ylabel=ylabel,
+            higher_better=higher,
+            n_samples=n,
+        )
+
+    fig.suptitle(title, fontsize=13, fontweight="bold", y=1.02)
+
+    legend_handles = [
+        mpatches.Patch(facecolor=fc, edgecolor=ec, linewidth=0.8,
+                       label=_legend_label(r["method"]))
+        for r, fc, ec in zip(ordered, face_colors, edge_colors)
+    ]
+    fig.legend(
+        handles=legend_handles,
+        loc="center left",
+        bbox_to_anchor=(0.73, 0.50),
+        fontsize=9,
+        frameon=True,
+        framealpha=0.9,
+        edgecolor="#cccccc",
+        title="Methods",
+        title_fontsize=8.5,
+    )
+
+    return fig

@@ -43,6 +43,7 @@ import numpy as np
 import wandb
 import inr_sos
 import yaml
+from inr_sos.visualization.plot_reconstruction import make_boxplots_4panel
 
 from PIL import Image
 
@@ -724,7 +725,7 @@ def log_summary_to_wandb(all_results, entry, indices, run_tag, sweep_id, log, wb
 
     # Box plots — in-memory to W&B
     log.info("  Rendering box plots ...")
-    fig_bp = make_boxplots(all_results)
+    fig_bp = make_boxplots_4panel(all_results) # Use the redesigned 4-panel box plot layout
     wandb.log({"boxplots": _fig_to_wandb_image(fig_bp, "Metric distributions")})
     # Also save PDF for thesis
     pdf_path = PLOT_DIR / f"{run_tag}_boxplots.pdf"
