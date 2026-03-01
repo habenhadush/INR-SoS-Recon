@@ -12,7 +12,11 @@ Outputs:
        - comparison_table  (sortable)
        - boxplots          (2×2 metrics + 1 full-width time panel)
        - reconstruction_grid (GT vs all methods on 2 random samples)
-  4. PDF box plots saved locally for thesis
+  4. Local plots folder:
+       scripts/plots/<sweep_id>/<dataset>/<job>__<n>samp__<init>__<ts>/
+           sample_<idx>.png   ← one per sample, all methods side by side
+           summary_boxplots.pdf
+           summary_recon_grid.pdf
   5. Registry updated
 
 Usage:
@@ -62,6 +66,26 @@ PLOT_DIR.mkdir(exist_ok=True)
 SOS_BG  = 1540.0
 SOS_MIN = 1380.0
 SOS_MAX = 1620.0
+
+
+# ── Output directory ──────────────────────────────────────────────────────────
+
+def _make_run_output_dir(sweep_id: str, dataset_key: str,
+                          job_name: str, n_samples: int,
+                          warm_init: bool) -> Path:
+    """
+    Create and return the per-run plot folder:
+        scripts/plots/<sweep_id>/<dataset>/<job>__<n>samp__<init>__<ts>/
+
+    If the same job_name is used again a new timestamped sibling is created,
+    so older runs are never overwritten and you can compare them side by side.
+    """
+    init_tag    = "warm" if warm_init else "cold"
+    ts          = datetime.now().strftime("%Y%m%d_%H%M")
+    folder_name = f"{job_name}__{n_samples}samp__{init_tag}__{ts}"
+    out_dir     = PLOT_DIR / sweep_id / dataset_key / folder_name
+    out_dir.mkdir(parents=True, exist_ok=True)
+    return out_dir
 
 
 # Utilities
@@ -118,19 +142,6 @@ def _legend_label(method_str: str) -> str:
 def warm_init_weights(model) -> None:
     """
     Zero only the output bias so the network predicts s_norm≈0 at step 0.
-
-    Why bias-only (not weight scaling):
-      s_phys = s_norm * s_std + s_mean
-      s_std is tiny (~1e-5 in slowness units), so even with random weights
-      the weight contribution to s_phys is negligible (~±1 m/s).
-      Zeroing the bias removes the systematic offset — that is enough to
-      start at background SoS without touching the weights.
-      Scaling weights by 0.01 would shrink gradients reaching hidden layers
-      by 100x, severely slowing convergence and potentially a false negative.
-
-    Architecture-aware:
-      ReluMLP / FourierMLP  →  final layer is model.net[-1]  (nn.Linear)
-      SirenMLP              →  final layer is model.final     (nn.Linear)
     """
     import torch
     with torch.no_grad():
@@ -175,11 +186,13 @@ def save_registry(registry):
 
 
 def get_used_indices(entry: dict) -> set:
+    """
+    Returns only the indices used during the Bayesian sweep itself.
+    Comparison / topk run indices are NOT excluded — those are test-time
+    evaluations and can safely be reused across comparison runs.
+    Only the sweep indices must stay off-limits (the models were tuned on them).
+    """
     used = set(entry.get("indices", []))
-    used |= set(entry.get("validation", {}).get("holdout_indices", []))
-    for key in entry:
-        if key.startswith("comparison") or key.startswith("topk"):
-            used |= set(entry[key].get("indices", []))
     return used
 
 
@@ -219,8 +232,6 @@ def compute_baseline_metrics(recons, gt, indices, label, log) -> dict:
     """
     mae, rmse, ssim, cnr, per_sample = [], [], [], [], []
     for idx in indices:
-        # MATLAB stores (x, z, N) column-major → transpose to (z, x) to match
-        # the INR coordinate convention from np.meshgrid(x_sos, z_sos)
         s_pred = np.asarray(recons[:, :, idx].T.flatten(), dtype=np.float32)
         s_gt_v = np.asarray(gt[:, :, idx].T.flatten(),    dtype=np.float32)
         m = calculate_metrics(s_phys_pred=s_pred, s_gt_raw=s_gt_v,
@@ -229,7 +240,7 @@ def compute_baseline_metrics(recons, gt, indices, label, log) -> dict:
         ssim.append(m["SSIM"]); cnr.append(m["CNR"])
         per_sample.append({
             "idx":       idx,
-            "s_phys_np": s_pred,    # store for reconstruction grid
+            "s_phys_np": s_pred,
             "s_gt_np":   s_gt_v,
             **m
         })
@@ -241,8 +252,6 @@ def compute_baseline_metrics(recons, gt, indices, label, log) -> dict:
 def compute_embedded_baseline_metrics(dataset, indices, label, sample_key, log) -> dict:
     """
     Compute baseline metrics using embedded baselines from USDataset.
-    Uses dataset[idx] which handles axis ordering automatically.
-    Stores s_phys_np and s_gt_np in per_sample for reconstruction grid.
     """
     mae, rmse, ssim, cnr, per_sample = [], [], [], [], []
     for idx in indices:
@@ -425,19 +434,12 @@ def print_table(all_results, log):
 
 
 # Box plots — redesigned layout
-#   Row 1: MAE | RMSE
-#   Row 2: SSIM | CNR
-#   Row 3: Reconstruction Time (full width)
 def make_boxplots(all_results: list) -> plt.Figure:
     """
     Adaptive distribution plot.
-      n < 5  → strip plot: individual dots + mean line (test runs with 2 samples)
-      n >= 5 → proper box plot with whiskers and outliers
-    Layout: Row 1: MAE | RMSE
-            Row 2: SSIM | CNR
-            Row 3: Reconstruction Time (full width)
+      n < 5  → strip plot
+      n >= 5 → proper box plot
     """
-    # Order: baselines then INR sorted by rank
     baselines = [r for r in all_results if "INR" not in r["method"]]
     inr_ranks = sorted(
         [r for r in all_results if "INR" in r["method"]],
@@ -448,13 +450,11 @@ def make_boxplots(all_results: list) -> plt.Figure:
     n       = all_results[0]["n_samples"]
     use_box = n >= 5
 
-    # Colors: grey shades for baselines, blue gradient for INR
     baseline_greys     = ["#aaaaaa", "#888888", "#666666", "#555555"][:len(baselines)]
     baseline_dot_greys = ["#666666", "#444444", "#333333", "#222222"][:len(baselines)]
     colors = baseline_greys + [
         plt.cm.Blues(0.35 + 0.13 * i) for i in range(len(inr_ranks))
     ]
-    # Darker versions for strip plot dots
     dot_colors = baseline_dot_greys + [
         plt.cm.Blues(0.55 + 0.12 * i) for i in range(len(inr_ranks))
     ]
@@ -479,7 +479,6 @@ def make_boxplots(all_results: list) -> plt.Figure:
             values.append(v if v else [0.0])
 
         if use_box:
-            # ── Box plot (n >= 5) ─────────────────────────────────────
             bp = ax.boxplot(
                 values,
                 patch_artist=True,
@@ -495,8 +494,6 @@ def make_boxplots(all_results: list) -> plt.Figure:
                 patch.set_facecolor(color)
                 patch.set_alpha(0.85)
         else:
-            # ── Strip plot (n < 5) — dots + mean line ─────────────────
-            # Each method gets jittered x positions so dots don't overlap
             rng_jitter = np.random.default_rng(seed=0)
             for col_i, (vals, color, dcolor) in enumerate(
                     zip(values, colors, dot_colors), start=1):
@@ -504,11 +501,9 @@ def make_boxplots(all_results: list) -> plt.Figure:
                 ax.scatter(col_i + jitter, vals,
                            color=dcolor, s=60, zorder=3, alpha=0.85,
                            edgecolors="white", linewidths=0.5)
-                # Mean line
                 mean_v = np.mean(vals)
                 ax.plot([col_i - 0.3, col_i + 0.3], [mean_v, mean_v],
                         color="black", linewidth=2.5, zorder=4)
-                # Std range bar
                 std_v = np.std(vals)
                 ax.plot([col_i, col_i],
                         [mean_v - std_v, mean_v + std_v],
@@ -525,12 +520,9 @@ def make_boxplots(all_results: list) -> plt.Figure:
         ax.spines["top"].set_visible(False)
         ax.spines["right"].set_visible(False)
 
-        # Shade INR region
         if len(baselines) < len(ordered):
             ax.axvspan(len(baselines) + 0.5, len(ordered) + 0.5,
                        alpha=0.06, color="#1f77b4", zorder=0)
-
-        # (clinical threshold line removed)
 
     for spec, key, ylabel, higher in panels:
         ax = fig.add_subplot(spec)
@@ -566,24 +558,24 @@ def make_boxplots(all_results: list) -> plt.Figure:
     return fig
 
 
-# Reconstruction grid
-#   Layout: 4 rows × (1 + N_methods) cols
-#     row 0: SoS maps for sample A     (GT | L2 | L1 | rank1 | ...)
-#     row 1: Error maps for sample A
-#     row 2: SoS maps for sample B
-#     row 3: Error maps for sample B
+# ── Per-sample comparison grid ────────────────────────────────────────────────
+
 def make_reconstruction_grid(all_results: list,
+                              vis_idxs: list = None,
                               n_visual_samples: int = 2,
                               rng_seed: int = 42) -> plt.Figure:
     """
-    Grid: 4 rows × (1 + N_methods) columns
-      row 0: SoS maps sample A  — GT | L2 | L1 | rank1 | ...
-      row 1: Abs error sample A
-      row 2: SoS maps sample B
-      row 3: Abs error sample B
+    Grid: 2 rows × (1 + N_methods) columns for one or more samples stacked.
+      row 0: SoS maps  — Ground Truth | L2 | L1 | rank1 | ...
+      row 1: Abs error
 
-    Colormap: jet with vmin=1400, vmax=1600 m/s — matches original engine
-    plot design. Blue = slow inclusion, orange/red = fast, clear contrast.
+    Parameters
+    ----------
+    all_results      : full list of method result dicts
+    vis_idxs         : explicit list of sample indices to show.
+                       If None, n_visual_samples random ones are chosen.
+    n_visual_samples : used only when vis_idxs is None
+    rng_seed         : used only when vis_idxs is None
     """
     # Common indices across all methods
     common_indices = set(s["idx"] for s in all_results[0]["per_sample"])
@@ -591,12 +583,13 @@ def make_reconstruction_grid(all_results: list,
         common_indices &= {s["idx"] for s in r["per_sample"]}
     common_indices = sorted(common_indices)
 
-    rng      = np.random.default_rng(seed=rng_seed)
-    n_pick   = min(n_visual_samples, len(common_indices))
-    vis_idxs = rng.choice(common_indices, size=n_pick, replace=False).tolist()
+    if vis_idxs is None:
+        rng    = np.random.default_rng(seed=rng_seed)
+        n_pick = min(n_visual_samples, len(common_indices))
+        vis_idxs = rng.choice(common_indices, size=n_pick, replace=False).tolist()
 
-    n_cols = 1 + len(all_results)     # GT + one col per method
-    n_rows = n_pick * 2               # SoS row + error row per sample
+    n_cols = 1 + len(all_results)   # GT + one col per method
+    n_rows = len(vis_idxs) * 2      # SoS row + error row per sample
 
     fig, axes = plt.subplots(
         n_rows, n_cols,
@@ -610,14 +603,13 @@ def make_reconstruction_grid(all_results: list,
         row_sos = row_pair * 2
         row_err = row_pair * 2 + 1
 
-        # GT from first result's per_sample
         gt_entry = next(s for s in all_results[0]["per_sample"]
                         if s["idx"] == vis_idx)
         s_gt_np  = gt_entry["s_gt_np"].flatten().astype(np.float32)
         v_gt     = np.clip(1.0 / (s_gt_np + 1e-8), 1400, 1600).reshape(64, 64)
         bg_sos   = float(np.median(v_gt))
 
-        # ── Column 0: Ground Truth ─────────────────────────────────────
+        # Column 0: Ground Truth
         ax_gt = axes[row_sos, 0]
         im_gt = ax_gt.imshow(v_gt, cmap="jet", vmin=1400, vmax=1600,
                               interpolation="nearest", origin="upper")
@@ -628,7 +620,6 @@ def make_reconstruction_grid(all_results: list,
         cb.set_label("m/s", fontsize=7)
         cb.ax.tick_params(labelsize=7)
 
-        # Info cell below GT
         axes[row_err, 0].axis("off")
         axes[row_err, 0].text(
             0.5, 0.5,
@@ -639,7 +630,6 @@ def make_reconstruction_grid(all_results: list,
                       edgecolor="#cccccc", linewidth=0.8)
         )
 
-        # ── Columns 1..N: each method ──────────────────────────────────
         for col, result in enumerate(all_results, start=1):
             entry   = next(s for s in result["per_sample"]
                            if s["idx"] == vis_idx)
@@ -648,7 +638,6 @@ def make_reconstruction_grid(all_results: list,
             err_map = np.abs(v_gt - v_rec)
             mae_val = float(np.mean(err_map))
 
-            # SoS reconstruction
             ax_sos = axes[row_sos, col]
             im_sos = ax_sos.imshow(v_rec, cmap="jet", vmin=1400, vmax=1600,
                                     interpolation="nearest", origin="upper")
@@ -660,7 +649,6 @@ def make_reconstruction_grid(all_results: list,
             cb2.set_label("m/s", fontsize=7)
             cb2.ax.tick_params(labelsize=7)
 
-            # Abs error
             ax_err = axes[row_err, col]
             im_err = ax_err.imshow(err_map, cmap="hot", vmin=0, vmax=50,
                                     interpolation="nearest", origin="upper")
@@ -671,8 +659,7 @@ def make_reconstruction_grid(all_results: list,
             cb3.set_label("m/s", fontsize=7)
             cb3.ax.tick_params(labelsize=7)
 
-    # Row labels on left margin
-    for rp in range(n_pick):
+    for rp in range(len(vis_idxs)):
         for row_offset, txt in [(0, "SoS (m/s)"), (1, "Abs. Error")]:
             axes[rp * 2 + row_offset, 0].annotate(
                 txt,
@@ -686,8 +673,40 @@ def make_reconstruction_grid(all_results: list,
     return fig
 
 
+def save_all_sample_grids(all_results: list, out_dir: Path, log) -> None:
+    """
+    Save one PNG per sample showing all methods side-by-side.
+
+    File:  <out_dir>/sample_<idx>.png
+
+    The image matches the attached reference:
+      Row 0 — SoS maps:   GT | L2 | L1 | rank1 | rank2 | ...
+      Row 1 — Abs error:       L2 | L1 | rank1 | rank2 | ...
+
+    This is called AFTER all method results (baselines + INR) are collected
+    so every method appears in every sample image.
+    """
+    # Common indices present in every method's per_sample list
+    common_indices = set(s["idx"] for s in all_results[0]["per_sample"])
+    for r in all_results[1:]:
+        common_indices &= {s["idx"] for s in r["per_sample"]}
+    common_indices = sorted(common_indices)
+
+    log.info(f"\n  Saving {len(common_indices)} per-sample comparison grids → {out_dir}")
+
+    for vis_idx in common_indices:
+        fig = make_reconstruction_grid(all_results, vis_idxs=[vis_idx])
+        save_path = out_dir / f"sample_{vis_idx:05d}.png"
+        fig.savefig(save_path, dpi=150, bbox_inches="tight", facecolor="white")
+        plt.close(fig)
+        log.info(f"    saved → {save_path.name}")
+
+    log.info(f"  All sample grids saved.")
+
+
 # W&B summary run
-def log_summary_to_wandb(all_results, entry, indices, run_tag, sweep_id, log, wb_group=None):
+def log_summary_to_wandb(all_results, entry, indices, run_tag, sweep_id, log,
+                          wb_group=None, out_dir: Path = None):
     wb_name = f"{run_tag}_SUMMARY"
     log.info(f"\n  Logging summary → W&B '{wb_name}'")
 
@@ -723,25 +742,28 @@ def log_summary_to_wandb(all_results, entry, indices, run_tag, sweep_id, log, wb
     )
     wandb.log({"comparison_table": table})
 
-    # Box plots — in-memory to W&B
+    # Box plots
     log.info("  Rendering box plots ...")
-    fig_bp = make_boxplots_4panel(all_results) # Use the redesigned 4-panel box plot layout
+    fig_bp = make_boxplots_4panel(all_results)
     wandb.log({"boxplots": _fig_to_wandb_image(fig_bp, "Metric distributions")})
-    # Also save PDF for thesis
-    pdf_path = PLOT_DIR / f"{run_tag}_boxplots.pdf"
+    pdf_path = (out_dir / "summary_boxplots.pdf") if out_dir else (PLOT_DIR / f"{run_tag}_boxplots.pdf")
     fig_bp.savefig(pdf_path, dpi=150, bbox_inches="tight")
     plt.close(fig_bp)
     log.info(f"  Box plot PDF → {pdf_path}")
 
-    # Reconstruction grid — 2 random samples
-    log.info("  Rendering reconstruction grid ...")
+    # Reconstruction grid (2 random samples) → W&B + PDF
+    log.info("  Rendering reconstruction grid (2 random samples for W&B) ...")
     fig_grid = make_reconstruction_grid(all_results, n_visual_samples=2)
     wandb.log({"reconstruction_grid": _fig_to_wandb_image(
         fig_grid, "GT vs all methods — 2 random samples")})
-    pdf_grid = PLOT_DIR / f"{run_tag}_recon_grid.pdf"
+    pdf_grid = (out_dir / "summary_recon_grid.pdf") if out_dir else (PLOT_DIR / f"{run_tag}_recon_grid.pdf")
     fig_grid.savefig(pdf_grid, dpi=150, bbox_inches="tight")
     plt.close(fig_grid)
     log.info(f"  Reconstruction grid PDF → {pdf_grid}")
+
+    # ── Save one PNG per sample (all methods side-by-side) ─────────────────
+    if out_dir is not None:
+        save_all_sample_grids(all_results, out_dir, log)
 
     wandb.finish()
 
@@ -775,7 +797,7 @@ def main():
  
     args = parser.parse_args()
 
-    # ── Load dataset FIRST (needed for n_samples resolution) ──────────────
+    # ── Load dataset FIRST ────────────────────────────────────────────────
     ds_cfg    = load_dataset_config(args.dataset)
     grid_path = DATA_DIR + "/DL-based-SoS/forward_model_lr/grid_parameters.mat"
     ds_kwargs = {}
@@ -792,14 +814,26 @@ def main():
     sel_tag   = f"top{args.top_k_per_model}permodel" if args.top_k_per_model else f"topk{args.top_k}"
     run_tag   = make_run_tag(f"{sel_tag}_fresh{n_samples}_{init_tag}",
                              args.sweep_id)
-    wb_group = args.job_name if args.job_name else run_tag
+    wb_group  = args.job_name if args.job_name else run_tag
+    job_label = args.job_name if args.job_name else sel_tag
     log_path, log = setup_logging(run_tag)
+
+    # ── Create output directory for local plots ───────────────────────────
+    out_dir = _make_run_output_dir(
+        sweep_id    = args.sweep_id,
+        dataset_key = ds_cfg["key"],
+        job_name    = job_label,
+        n_samples   = n_samples,
+        warm_init   = args.warm_init,
+    )
+    log.info(f"  Local plot folder → {out_dir}")
 
     log.info("=" * 70)
     log.info(f"  Top-K comparison  |  {run_tag}")
     log.info(f"  Sweep    : {args.sweep_id}")
     log.info(f"  Dataset  : {ds_cfg['name']}  ({ds_cfg['key']})")
     log.info(f"  Top-K    : {args.top_k}  |  Samples: {n_samples} / {len(dataset)} available")
+    log.info(f"  Plots    : {out_dir}")
     n_configs_est = (args.top_k_per_model * 3) if args.top_k_per_model else args.top_k
     est = n_configs_est * n_samples * 20
     log.info(f"  Est. time: ~{est//60}h{est%60:02d}m  (20 min/sample, {n_configs_est} configs)")
@@ -855,23 +889,20 @@ def main():
     )
 
     if args.top_k_per_model:
-        # ── Top-K per model type — ensures every architecture is represented ─
         k = args.top_k_per_model
         model_types = ["ReluMLP", "FourierMLP", "SirenMLP"]
         selected = []
         for mtype in model_types:
-            pool = [r for r in completed if r.config.get("model_type") == mtype]
-            if not pool:
+            pool_m = [r for r in completed if r.config.get("model_type") == mtype]
+            if not pool_m:
                 log.warning(f"  No completed runs found for model_type={mtype}")
                 continue
-            selected.extend(pool[:k])
-            log.info(f"  {mtype}: {len(pool)} completed → taking top-{min(k, len(pool))}"
-                     f"  (best MAE={pool[0].summary['MAE_mean']:.3f})")
-        # Sort selected by MAE for consistent rank assignment
+            selected.extend(pool_m[:k])
+            log.info(f"  {mtype}: {len(pool_m)} completed → taking top-{min(k, len(pool_m))}"
+                     f"  (best MAE={pool_m[0].summary['MAE_mean']:.3f})")
         selected = sorted(selected, key=lambda r: r.summary["MAE_mean"])
         log.info(f"\nTop-{k}-per-model selection: {len(selected)} configs total")
     else:
-        # ── Global top-K (original behaviour) ────────────────────────────────
         selected = completed[:args.top_k]
         log.info(f"\nGlobal top-{args.top_k} sweep configs:")
 
@@ -905,10 +936,23 @@ def main():
     all_results = baseline_results + inr_results
     print_table(all_results, log)
 
-    # ── W&B summary ───────────────────────────────────────────────────────
+    # ── W&B summary + local plots ─────────────────────────────────────────
     if not args.no_wandb:
         log_summary_to_wandb(all_results, entry, indices, run_tag,
-                             args.sweep_id, log, wb_group=wb_group)
+                             args.sweep_id, log, wb_group=wb_group,
+                             out_dir=out_dir)
+    else:
+        # Even without W&B, save all sample grids and summary PDFs locally
+        log.info("\n  --no_wandb: saving plots locally only ...")
+        fig_bp = make_boxplots_4panel(all_results)
+        fig_bp.savefig(out_dir / "summary_boxplots.pdf", dpi=150, bbox_inches="tight")
+        plt.close(fig_bp)
+        fig_grid = make_reconstruction_grid(all_results, n_visual_samples=2)
+        fig_grid.savefig(out_dir / "summary_recon_grid.pdf", dpi=150, bbox_inches="tight")
+        plt.close(fig_grid)
+        save_all_sample_grids(all_results, out_dir, log)
+
+    log.info(f"\n  Reconstruction plots → {out_dir}")
 
     # ── Registry ──────────────────────────────────────────────────────────
     slim_results = [{k: v for k, v in r.items() if k != "per_sample"}
@@ -923,6 +967,7 @@ def main():
                 "n_samples":   len(indices),
                 "indices":     indices,
                 "elapsed_hrs": round(total_hrs, 2),
+                "plot_dir":    str(out_dir),
                 "results":     slim_results,
             }
     save_registry(registry)
