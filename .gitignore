@@ -1,5 +1,7 @@
 # claude
 CLAUDE.md
+.claude/*
+references_kwave_gap.txt
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[codz]
