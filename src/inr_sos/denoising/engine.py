@@ -82,15 +82,14 @@ class _DenoiserEarlyStopper:
             return original_mask.flatten()
         return self.train_mask
 
-    def evaluate(self, d_pred, d_meas, config, model, step):
-        """Compute val MSE. Returns (val_loss, should_stop)."""
+    def evaluate(self, d_pred, d_target, config, model, step):
+        """Compute val MSE in normalized space. Returns (val_loss, should_stop)."""
         if not self.enabled:
             return None, False
 
-        residual = (d_pred.flatten() - d_meas.flatten()) * self.val_mask
-        residual_scaled = residual * config.time_scale
+        residual = (d_pred.flatten() - d_target.flatten()) * self.val_mask
         n_val = self.val_mask.sum() + 1e-8
-        val_loss = (residual_scaled ** 2).sum() / n_val
+        val_loss = (residual ** 2).sum() / n_val
         val_loss_val = val_loss.item()
 
         if val_loss_val < self.best_val_loss:
@@ -144,6 +143,18 @@ def denoise_displacement(
     mask_flat = mask.flatten().to(_DEVICE)
     features = ray_features.to(_DEVICE)
 
+    # Normalize d_meas to zero-mean unit-variance over valid rays.
+    # This aligns the target range with SIREN's initial output range (~0.01).
+    # Without this, d_meas (~1e-7 seconds) is 5-6 orders of magnitude from
+    # the INR initialization, causing unstable early training.
+    valid_mask = mask_flat > 0.5
+    d_valid = d_meas_flat[valid_mask]
+    d_mean = d_valid.mean()
+    d_std = d_valid.std() + 1e-12
+    d_norm = (d_meas_flat - d_mean) / d_std  # normalized targets
+
+    _log.info(f"d_meas stats (valid): mean={d_mean.item():.6e}, std={d_std.item():.6e}")
+
     model = _build_denoiser_model(config).to(_DEVICE)
     optimizer = optim.Adam(model.parameters(), lr=config.lr)
 
@@ -164,13 +175,12 @@ def denoise_displacement(
         model.train()
         optimizer.zero_grad()
 
-        d_pred = model(features).flatten()  # (N,)
+        d_pred = model(features).flatten()  # (N,) predicts in normalized space
 
-        # MSE on train rays (no Huber — we want uniform weighting)
-        residual = (d_pred - d_meas_flat) * train_mask
-        residual_scaled = residual * config.time_scale
+        # MSE on train rays in normalized space (no time_scale needed)
+        residual = (d_pred - d_norm) * train_mask
         n_train = train_mask.sum() + 1e-8
-        loss = (residual_scaled ** 2).sum() / n_train
+        loss = (residual ** 2).sum() / n_train
 
         loss.backward()
         optimizer.step()
@@ -181,12 +191,12 @@ def denoise_displacement(
         if step % 50 == 0:
             pbar.set_description(f"Denoiser loss: {loss_val:.4f}")
 
-        # Early stopping evaluation
+        # Early stopping evaluation (in normalized space)
         if stopper.enabled and step % config.log_interval == 0:
             with torch.no_grad():
                 d_pred_eval = model(features).flatten()
                 vl, should_stop = stopper.evaluate(
-                    d_pred_eval, d_meas_flat, config, model, step
+                    d_pred_eval, d_norm, config, model, step
                 )
             if vl is not None:
                 val_loss_history.append((step, vl))
@@ -206,10 +216,11 @@ def denoise_displacement(
 
     stopper.restore_best(model)
 
-    # Generate d_clean from best model
+    # Generate d_clean from best model, denormalize back to original scale
     model.eval()
     with torch.no_grad():
-        d_clean = model(features).flatten()
+        d_clean_norm = model(features).flatten()  # in normalized space
+        d_clean = d_clean_norm * d_std + d_mean    # back to seconds
 
     # Keep original d_meas for masked-out rays
     d_out = d_meas_flat.clone()

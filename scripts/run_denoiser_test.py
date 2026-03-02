@@ -151,21 +151,17 @@ def run_oracle_experiment(sample, L_matrix, dataset, recon_config, ray_features)
 
 
 def compute_baseline_metrics(sample, dataset, idx):
-    """Extract L1/L2 baseline metrics if available."""
+    """Extract L1/L2 baseline metrics if available.
+
+    Benchmarks are stored as slowness (s/m) in all_slowness_recons_l1/l2.
+    They're loaded into sample['s_l1_recon'] / sample['s_l2_recon'] by USDataset.
+    """
     rows = []
-    for bname, attr in [("L1", "benchmarks_l1"), ("L2", "benchmarks_l2")]:
-        bench = getattr(dataset, attr, None)
-        if bench is None:
+    for bname, key in [("L1", "s_l1_recon"), ("L2", "s_l2_recon")]:
+        if key not in sample:
             continue
-        if bench.ndim == 3:
-            b_img = bench[idx]
-        else:
-            b_img = bench
-        b_flat = torch.tensor(b_img, dtype=torch.float32).flatten()
-        # benchmarks are in SoS (m/s), convert to slowness
-        b_slowness = 1.0 / (b_flat + 1e-8)
         m = calculate_metrics(
-            s_phys_pred=b_slowness.unsqueeze(-1),
+            s_phys_pred=sample[key],
             s_gt_raw=sample["s_gt_raw"],
             grid_shape=(64, 64),
         )
@@ -180,6 +176,10 @@ def main():
     parser.add_argument("--indices", nargs="+", type=int, default=[0])
     parser.add_argument("--omega", nargs="+", type=float, default=[10.0],
                         help="Denoiser SIREN omega values to test")
+    parser.add_argument("--hidden", nargs="+", type=int, default=[128],
+                        help="Denoiser hidden features to test")
+    parser.add_argument("--layers", nargs="+", type=int, default=[3],
+                        help="Denoiser hidden layers to test")
     parser.add_argument("--steps", type=int, default=5000, help="Denoiser max steps")
     parser.add_argument("--patience", type=int, default=300, help="Denoiser patience")
     parser.add_argument("--recon_steps", type=int, default=500, help="Reconstruction steps")
@@ -276,20 +276,26 @@ def main():
             log.info(f"  Oracle: MAE={m_oracle['MAE']:.2f}, SSIM={m_oracle['SSIM']:.4f}")
             all_results.append({"sample_idx": idx, **m_oracle})
 
-        # --- Denoiser with different omega values ---
-        for omega in args.omega:
-            log.info(f"\n--- Denoiser (omega={omega}) ---")
+        # --- Denoiser with different configs ---
+        from itertools import product
+        configs_to_test = list(product(args.omega, args.hidden, args.layers))
+        for omega, hidden, layers in configs_to_test:
+            n_params_est = hidden * 3 + hidden + layers * (hidden * hidden + hidden) + hidden + 1
+            label = f"Denoiser w={omega} h={hidden} L={layers} (~{n_params_est//1000}K)"
+            log.info(f"\n--- {label} ---")
             d_config = DenoiserConfig(
                 omega=omega,
+                hidden_features=hidden,
+                hidden_layers=layers,
                 steps=args.steps,
                 patience=args.patience,
                 time_scale=time_scale,
             )
             m_den, result = run_single_experiment(
                 sample, dataset.L_matrix, dataset, recon_config, d_config,
-                ray_features, label=f"Denoiser omega={omega}",
+                ray_features, label=label,
             )
-            log.info(f"  Denoiser omega={omega}: MAE={m_den['MAE']:.2f}, "
+            log.info(f"  {label}: MAE={m_den['MAE']:.2f}, "
                      f"SSIM={m_den['SSIM']:.4f}")
 
             # Denoiser diagnostics
@@ -297,6 +303,24 @@ def main():
                 dr = result["denoiser_result"]
                 log.info(f"    best_step={dr['best_step']}, "
                          f"train_loss_final={dr['loss_history'][-1]:.4f}")
+
+                # d_meas vs d_clean statistics
+                d_orig = sample["d_meas"].flatten().numpy()
+                d_clean = dr["d_clean"].flatten().numpy()
+                d_resid = dr["d_residual"].flatten().numpy()
+                mask_np = sample["mask"].flatten().numpy()
+                valid = mask_np > 0.5
+
+                log.info(f"    d_meas  valid: mean={d_orig[valid].mean():.6e}, "
+                         f"std={d_orig[valid].std():.6e}, "
+                         f"range=[{d_orig[valid].min():.6e}, {d_orig[valid].max():.6e}]")
+                log.info(f"    d_clean valid: mean={d_clean[valid].mean():.6e}, "
+                         f"std={d_clean[valid].std():.6e}, "
+                         f"range=[{d_clean[valid].min():.6e}, {d_clean[valid].max():.6e}]")
+                log.info(f"    residual: mean={d_resid[valid].mean():.6e}, "
+                         f"std={d_resid[valid].std():.6e}, "
+                         f"||resid||/||d_meas||={np.linalg.norm(d_resid[valid])/np.linalg.norm(d_orig[valid]):.4f}")
+
                 # Denoised error floor
                 denoised_sample = {**sample, "d_meas": dr["d_clean"]}
                 d_floor = compute_model_error_floor(
