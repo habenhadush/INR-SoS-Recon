@@ -1,0 +1,87 @@
+K-Wave Generalization Gap — Reference Papers
+==============================================
+Collected 2026-02-28 during IC-to-kwave failure analysis
+
+1. Byra et al. (2024) — INR for SoS Estimation
+   "Implicit Neural Representations for Speed-of-Sound Estimation in Ultrasound"
+   Key: Per-case INR with differentiable beamformer; avoids fixed L-matrix
+   https://arxiv.org/abs/2409.14035
+
+2. Learned Correction Methods for USCT (Feb 2025)
+   "Learned Correction Methods for Ultrasound Computed Tomography Imaging Using Simplified Physics Models"
+   Key: Data correction (preprocess d_meas) generalizes better than artifact correction (post-hoc CNN)
+   https://arxiv.org/abs/2502.09546
+
+3. P2INR-FWI — MICCAI 2025
+   "P2INR-FWI: an Implicit Neural Representation for Full-Waveform Inversion in USCT"
+   Key: Polar-coordinate INR + structural prior; mitigates cycle-skipping
+   https://papers.miccai.org/miccai-2025/paper/2163_paper.pdf
+
+4. Plug-and-Play Untrained NN for FWI (2024)
+   "A Plug-and-Play Untrained Neural Network for Full Waveform Inversion in Reconstructing Sound Speed Images of Ultrasound Computed Tomography"
+   Key: Network architecture as implicit regularizer (Deep Image Prior); early stopping critical
+   https://arxiv.org/abs/2406.08523
+
+5. Physics and Deep Learning in Computational Wave Imaging (2024)
+   Key: Survey of physics-based vs deep-learning approaches for wave imaging
+   https://arxiv.org/abs/2410.08329
+
+6. Robust DL for Pulse-echo SoS via Time-shift Maps (2024)
+   Key: Time-shift DL resilient to resolution mismatch, generalizes across forward model variations
+   https://pmc.ncbi.nlm.nih.gov/articles/PMC12629671/
+
+7. 3-D Forward Model with Transducer Modeling (IEEE TUFFC 2023)
+   "A Forward Model Incorporating Elevation-Focused Transducer Properties for 3-D FWI in USCT"
+   Key: 2D/3D model mismatch causes significant artifacts; 3D forward model needed
+   https://pmc.ncbi.nlm.nih.gov/articles/PMC10775680/
+
+8. DNN-based SoS with Tikhonov Pseudo-Inverse Prior (2023)
+   "Deep-Learning-Based Ultrasound Sound-Speed Tomography Reconstruction with Tikhonov Pseudo-Inverse Priori"
+   Key: Combining classical regularization with DL reconstruction
+   https://pmc.ncbi.nlm.nih.gov/articles/PMC10448397/
+
+
+Phase 2: Displacement Field Denoising — Reference Papers
+=========================================================
+Collected 2026-03-01 during measurement-domain correction research
+
+9. Ring Artifact Removal via INR Sinogram Decomposition (2024)
+   "Ring Artifacts Removal Based on Implicit Neural Representation of Sinogram Data"
+   Key: Two INRs decompose sinogram into ideal signal + stripe artifacts;
+        directional regularization (smooth signal, sparse artifacts); unsupervised
+   https://arxiv.org/abs/2409.15731
+
+10. Diff-INR: Generative Regularization for EIT (2024)
+    "Diff-INR: Generative Regularization for Electrical Impedance Tomography"
+    Key: INR + diffusion prior for inverse problem; bandwidth control via positional encoding;
+         robust to noise (40-60 dB SNR); mesh-resolution agnostic
+    https://arxiv.org/abs/2409.04494
+
+11. Untrained NN for Inverse Problems with Model Mismatch (2024)
+    "Solving Inverse Problems with Model Mismatch using Untrained Neural Networks within Model-based Architectures"
+    Key: Untrained forward model residual block corrects model mismatch per-instance;
+         joint optimization of correction + reconstruction; 2-3 dB PSNR improvement
+    https://arxiv.org/abs/2403.04847
+
+12. FINER: Spectral-Bias Tuning in INR (CVPR 2024)
+    "FINER: Flexible spectral-bias tuning in Implicit NEural Representation by Variable-periodic Activation Functions"
+    Key: INRs inherently fit low-frequency first (spectral bias); can be exploited for denoising;
+         variable-periodic activations allow frequency control
+    https://openaccess.thecvf.com/content/CVPR2024/papers/Liu_FINER_Flexible_Spectral-bias_Tuning_in_Implicit_NEural_Representation_by_Variable-periodic_CVPR_2024_paper.pdf
+
+13. Deep Image Prior Survey (2025)
+    "A Survey on Deep Image Prior for Image Denoising"
+    Key: Untrained networks leverage architectural bias as implicit prior;
+         zero-sample learning; spectral bias = natural denoiser with early stopping
+    https://www.sciencedirect.com/science/article/abs/pii/S105120042500257X
+
+14. NN-Based Regularization for Inverse Problems in Imaging (2024)
+    "Neural-network-based regularization methods for inverse problems in imaging"
+    Key: Survey of learned vs untrained NN regularizers; data correction in measurement domain
+         preferred over post-hoc image correction
+    https://onlinelibrary.wiley.com/doi/full/10.1002/gamm.202470004
+
+15. Accelerated INR for CT Reconstruction (2025)
+    "Accelerated optimization of implicit neural representations for CT reconstruction"
+    Key: INR implicit regularization prevents overfitting to noise/artifacts in reconstruction
+    https://arxiv.org/abs/2504.13390
