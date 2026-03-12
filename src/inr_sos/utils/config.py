@@ -37,6 +37,14 @@ class ExperimentConfig:
     # --- Physics Constraints ---
     clamp_slowness: bool = False    # clamp s_phys to [1/1800, 1/1200] s/m
 
+    # --- Layer 3: Joint Reconstruction + Residual Correction ---
+    # Based on Gilton et al. (ICLR 2025): untrained residual block with τ-penalty
+    tau: float = 0.1               # L2 penalty on residual INR (prevents trivial solution)
+    residual_hidden: int = 128     # hidden size for residual INR
+    residual_layers: int = 3       # hidden layers for residual INR
+    residual_lr: float = 1e-3      # separate learning rate for residual INR
+    residual_omega: float = 10.0   # omega for residual SIREN (lower = smoother correction)
+
     # --- Early Stopping ---
     early_stopping: bool = False
     patience: int = 100             # stop if no val improvement for this many steps

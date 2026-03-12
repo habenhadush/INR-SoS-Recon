@@ -14,6 +14,7 @@ from torch.utils.data import DataLoader
 from inr_sos.utils.data import RayDataset
 from tqdm import tqdm
 from inr_sos.utils.config import ExperimentConfig as ec
+from inr_sos.models.residual_inr import ResidualSiren, build_ray_coordinates
 
 logging.basicConfig(
     level=logging.INFO,
@@ -687,4 +688,190 @@ def optimize_stochastic_ray_batching(sample, L_matrix, model, label, config: ec,
         's_norm':       s_norm.detach().cpu(),
         'loss_history': loss_history,
         'model_state':  model.state_dict()
+    }
+
+
+def optimize_joint_residual(sample, L_matrix, model, label, config: ec, use_wandb=False):
+    """Layer 3: Joint reconstruction + residual correction.
+
+    Based on Gilton et al. (ICLR 2025) — "Solving Inverse Problems with Model
+    Mismatch using Untrained Neural Networks within Model-based Architectures".
+
+    Jointly optimizes two networks:
+        f_θ(x, z) → slowness field  (reconstruction INR, existing architecture)
+        g_φ(pair, row, col) → per-ray correction  (residual INR, untrained)
+
+    Loss function (adapted from Gilton et al. Eq. 6):
+        ‖L·f_θ(X) + g_φ(ray_coords) − d_meas‖² + λ_TV·TV(f_θ) + τ·‖g_φ‖²
+
+    The τ-penalty prevents the trivial solution where g_φ explains all of
+    d_meas and f_θ collapses. Per their experiments, τ=0.1 works broadly.
+    The residual INR is untrained per-instance — no supervised data required.
+
+    Args:
+        sample:   dict with coords, d_meas, mask, s_gt_raw, s_stats
+        L_matrix: (M, N) forward model
+        model:    reconstruction INR (f_θ)
+        label:    experiment label string
+        config:   ExperimentConfig with tau, residual_hidden, residual_layers, etc.
+        use_wandb: enable W&B logging
+
+    Returns:
+        Standard result_dict plus:
+            'residual':              (M, 1) learned correction g_φ
+            'residual_model_state':  state dict of residual INR
+            'residual_norm_history': per-step |g_φ| for monitoring separation
+    """
+    logging.info(
+        f"\n--- {inspect.currentframe().f_code.co_name}: Training {label} "
+        f"(joint residual, τ={config.tau}) on {_DEVICE} ---"
+    )
+
+    # ── Setup ──────────────────────────────────────────────────────────────
+    model = model.to(_DEVICE)
+    coords = sample['coords'].to(_DEVICE)
+    d_meas = sample['d_meas'].to(_DEVICE)
+    mask   = sample['mask'].to(_DEVICE)
+    s_mean = sample['s_stats'][0].item()
+    s_std  = sample['s_stats'][1].item()
+    L      = L_matrix.to(_DEVICE)
+
+    n_rays = L.shape[0]
+
+    # ── Build residual INR (g_φ) ───────────────────────────────────────────
+    residual_model = ResidualSiren(
+        in_features=3,
+        hidden_features=config.residual_hidden,
+        hidden_layers=config.residual_layers,
+        omega_0=config.residual_omega,
+    ).to(_DEVICE)
+
+    ray_coords = build_ray_coordinates(n_rays, n_pairs=8, device=_DEVICE)
+
+    n_params_recon = sum(p.numel() for p in model.parameters())
+    n_params_resid = sum(p.numel() for p in residual_model.parameters())
+    logging.info(
+        f"  Reconstruction INR: {n_params_recon} params"
+    )
+    logging.info(
+        f"  Residual INR: {n_params_resid} params, "
+        f"hidden={config.residual_hidden}×{config.residual_layers}, "
+        f"ω={config.residual_omega}"
+    )
+
+    # ── Optimizers: separate LRs (Gilton et al. Eq. 7) ────────────────────
+    optimizer = optim.Adam([
+        {'params': model.parameters(),          'lr': config.lr},
+        {'params': residual_model.parameters(), 'lr': config.residual_lr},
+    ])
+    scheduler = optim.lr_scheduler.CosineAnnealingLR(
+        optimizer, T_max=config.steps, eta_min=1e-6
+    )
+
+    # ── Early stopping ─────────────────────────────────────────────────────
+    stopper = _EarlyStopper(mask, config, model)
+    train_mask = stopper.get_train_mask(mask)
+
+    loss_history = []
+    residual_norm_history = []
+
+    pbar = tqdm(range(config.steps))
+
+    for step in pbar:
+        pbar.set_postfix({"method": "joint_residual", "model": label})
+        model.train()
+        residual_model.train()
+        optimizer.zero_grad()
+
+        # ── Forward pass ───────────────────────────────────────────────────
+        s_norm = model(coords)
+        s_phys = _maybe_clamp_slowness(s_norm * s_std + s_mean, config)
+
+        d_model = L @ s_phys                       # (M, 1) L·f_θ
+        g_correction = residual_model(ray_coords)   # (M, 1) g_φ
+
+        # d_pred = L·f_θ + g_φ  (Gilton et al. Eq. 5)
+        d_pred = d_model + g_correction
+        residual_seconds = d_pred - d_meas
+
+        # ── Data fidelity loss ─────────────────────────────────────────────
+        loss_data = _compute_data_loss(residual_seconds, train_mask, config)
+
+        # ── Regularization on reconstruction f_θ ───────────────────────────
+        reg_loss = 0.0
+        if config.reg_weight > 0:
+            reg_loss += config.reg_weight * (s_norm ** 2).mean()
+        if config.tv_weight > 0:
+            s_img = s_phys.reshape(64, 64)
+            tv_x = ((s_img[:, 1:] - s_img[:, :-1]) ** 2).mean()
+            tv_z = ((s_img[1:, :] - s_img[:-1, :]) ** 2).mean()
+            reg_loss += config.tv_weight * (tv_x + tv_z)
+
+        # ── τ-penalty on residual g_φ (Gilton et al. Eq. 6) ───────────────
+        # Prevents trivial solution: τ too small → g_φ explains everything;
+        # τ too large → no correction. Gilton et al. use τ=0.1 universally.
+        g_masked = g_correction * mask
+        n_valid = mask.sum() + 1e-8
+        tau_penalty = config.tau * (g_masked ** 2).sum() / n_valid
+
+        # ── Total loss ─────────────────────────────────────────────────────
+        total_loss = loss_data + reg_loss + tau_penalty
+        total_loss.backward()
+        optimizer.step()
+        scheduler.step()
+
+        loss_history.append(total_loss.item())
+
+        # ── Monitoring ─────────────────────────────────────────────────────
+        with torch.no_grad():
+            g_norm = g_masked.abs().sum() / n_valid
+            residual_norm_history.append(g_norm.item())
+
+        if step % 50 == 0:
+            g_frac = g_masked.abs().sum() / ((d_model.abs() * mask).sum() + 1e-8)
+            pbar.set_description(
+                f"Loss:{loss_data.item():.4f} τ-pen:{tau_penalty.item():.4f} "
+                f"|g|/|Ls|:{g_frac.item():.3f}"
+            )
+
+        # ── Early stopping ─────────────────────────────────────────────────
+        if stopper.enabled and step % config.log_interval == 0:
+            with torch.no_grad():
+                val_loss, should_stop = stopper.evaluate(
+                    residual_seconds.detach(), config, model
+                )
+            if use_wandb and val_loss is not None:
+                wandb.log({"Val Loss": val_loss}, step=step)
+            if should_stop:
+                logging.info(f"Early stopping at step {step}")
+                break
+
+        if use_wandb:
+            wandb.log({
+                "Total Loss":     total_loss.item(),
+                "Data Loss":      loss_data.item(),
+                "Tau Penalty":    tau_penalty.item(),
+                "Residual |g|":   g_norm.item(),
+                "Learning Rate":  scheduler.get_last_lr()[0],
+            }, step=step)
+
+    # ── Restore best model ─────────────────────────────────────────────────
+    stopper.restore_best(model)
+
+    # ── Final evaluation ───────────────────────────────────────────────────
+    model.eval()
+    residual_model.eval()
+    with torch.no_grad():
+        s_norm = model(coords)
+        s_phys = _maybe_clamp_slowness(s_norm * s_std + s_mean, config)
+        g_final = residual_model(ray_coords)
+
+    return {
+        's_phys':               s_phys.detach().cpu(),
+        's_norm':               s_norm.detach().cpu(),
+        'loss_history':         loss_history,
+        'model_state':          model.state_dict(),
+        'residual':             g_final.detach().cpu(),
+        'residual_model_state': residual_model.state_dict(),
+        'residual_norm_history': residual_norm_history,
     }
