@@ -29,13 +29,15 @@ _SLOWNESS_MIN = 1.0 / 1800.0   # fastest tissue  ~5.56e-4
 _SLOWNESS_MAX = 1.0 / 1200.0   # slowest tissue  ~8.33e-4
 
 
-def _compute_data_loss(residual_seconds, mask, config):
+def _compute_data_loss(residual_seconds, mask, config, ray_weights=None):
     """Compute data-fidelity loss with switchable MSE / Huber.
 
     Args:
         residual_seconds: (d_pred - d_meas) in seconds, NOT yet masked.
         mask:             binary mask (1 = valid ray).
         config:           ExperimentConfig instance.
+        ray_weights:      optional (M, 1) per-ray weights (from SVD/BAE).
+                          If None, uniform weighting is used.
 
     Returns:
         Scalar loss tensor (mean over valid rays).
@@ -49,14 +51,27 @@ def _compute_data_loss(residual_seconds, mask, config):
     if config.loss_type == "huber":
         # F.huber_loss with reduction='sum' then normalise manually
         target = torch.zeros_like(residual_scaled)
-        loss = F.huber_loss(
-            residual_scaled, target,
-            delta=config.huber_delta,
-            reduction="sum",
-        ) / n_valid
+        if ray_weights is not None:
+            # Weighted Huber: apply sqrt(w) to both sides so
+            # Huber(sqrt(w)*r, 0) approximates w*Huber(r, 0) for small r
+            w_sqrt = torch.sqrt(ray_weights.clamp(min=0))
+            loss = F.huber_loss(
+                w_sqrt * residual_scaled, target,
+                delta=config.huber_delta,
+                reduction="sum",
+            ) / n_valid
+        else:
+            loss = F.huber_loss(
+                residual_scaled, target,
+                delta=config.huber_delta,
+                reduction="sum",
+            ) / n_valid
     else:
         # Default: MSE (matches original behaviour)
-        loss = (residual_scaled ** 2).sum() / n_valid
+        if ray_weights is not None:
+            loss = (ray_weights * residual_scaled ** 2).sum() / n_valid
+        else:
+            loss = (residual_scaled ** 2).sum() / n_valid
 
     return loss
 
@@ -66,6 +81,36 @@ def _maybe_clamp_slowness(s_phys, config):
     if config.clamp_slowness:
         return s_phys.clamp(min=_SLOWNESS_MIN, max=_SLOWNESS_MAX)
     return s_phys
+
+
+def _build_ray_weights(config, mask, svd_info=None, bae_stats=None):
+    """Combine SVD and/or BAE weights into a single per-ray weight vector.
+
+    Returns None if config.loss_weighting == 'none', otherwise (M, 1) tensor.
+    """
+    if config.loss_weighting == "none":
+        return None
+
+    M = mask.shape[0]
+    combined = torch.ones(M, 1, dtype=torch.float32)
+
+    if 'svd' in config.loss_weighting and svd_info is not None:
+        combined = combined * svd_info['weights'].cpu()
+
+    if 'bae' in config.loss_weighting and bae_stats is not None and config.bae_reweight:
+        from inr_sos.utils.mismatch import compute_bae_weights
+        bae_w = compute_bae_weights(bae_stats, config)
+        combined = combined * bae_w.cpu()
+
+    # Ensure non-negative and renormalize to mean 1.0 over valid rays
+    combined = combined.clamp(min=0)
+    valid_mask = mask.cpu().flatten() > 0.5
+    if valid_mask.sum() > 0:
+        valid_mean = combined.flatten()[valid_mask].mean()
+        if valid_mean > 1e-8:
+            combined = combined / valid_mean
+
+    return combined
 
 
 class _EarlyStopper:
@@ -382,10 +427,19 @@ def optimize_direct_supervision(sample, L_matrix, model, label, config: ec, use_
     }
 
 
-def optimize_full_forward_operator(sample, L_matrix, model, label, config: ec, use_wandb=False):
-    """Phase 1: Full-matrix reconstruction.
+def optimize_full_forward_operator(sample, L_matrix, model, label, config: ec, use_wandb=False,
+                                    bae_stats=None, svd_info=None):
+    """Full-matrix reconstruction with optional mismatch correction.
 
-    Supports: Huber/MSE loss, slowness clamping, early stopping.
+    Supports: Huber/MSE loss, slowness clamping, early stopping,
+    SVD-weighted loss (Layer 1), diagonal BAE correction (Layer 2).
+
+    Args:
+        bae_stats: dict from compute_bae_stats (Layer 2). If provided and
+            config.loss_weighting includes 'bae', applies mean-subtraction
+            and/or inverse-variance reweighting.
+        svd_info: dict from compute_svd_weights (Layer 1). If provided and
+            config.loss_weighting includes 'svd', applies SVD-based weights.
     """
     logging.info(f"\n--- {inspect.currentframe().f_code.co_name}: Training {label} (full-matrix) on {_DEVICE} ---")
 
@@ -396,6 +450,18 @@ def optimize_full_forward_operator(sample, L_matrix, model, label, config: ec, u
     s_mean = sample['s_stats'][0].item()
     s_std  = sample['s_stats'][1].item()
     L      = L_matrix.to(_DEVICE)
+
+    # --- Layer 2: BAE mean-subtraction ---
+    if bae_stats is not None and 'bae' in config.loss_weighting and config.bae_subtract_mean:
+        from inr_sos.utils.mismatch import correct_measurements
+        d_meas = correct_measurements(d_meas, bae_stats, config)
+        logging.info("Applied BAE mean-subtraction to measurements")
+
+    # --- Compute per-ray weights (Layer 1 + Layer 2) ---
+    ray_weights = _build_ray_weights(config, mask, svd_info, bae_stats)
+    if ray_weights is not None:
+        ray_weights = ray_weights.to(_DEVICE)
+        logging.info(f"Loss weighting: {config.loss_weighting}")
 
     optimizer = optim.Adam(model.parameters(), lr=config.lr)
     scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=config.steps)
@@ -417,7 +483,7 @@ def optimize_full_forward_operator(sample, L_matrix, model, label, config: ec, u
 
         d_pred_seconds   = L @ s_phys
         residual_seconds = d_pred_seconds - d_meas
-        loss = _compute_data_loss(residual_seconds, train_mask, config)
+        loss = _compute_data_loss(residual_seconds, train_mask, config, ray_weights)
 
         reg_loss = 0
         if config.reg_weight > 0:

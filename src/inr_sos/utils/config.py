@@ -37,6 +37,13 @@ class ExperimentConfig:
     # --- Physics Constraints ---
     clamp_slowness: bool = False    # clamp s_phys to [1/1800, 1/1200] s/m
 
+    # --- Mismatch Correction (Layer 1 & 2) ---
+    loss_weighting: str = "none"    # "none", "svd", "bae", "svd+bae"
+    svd_top_k: int = 3800          # keep top-k singular modes at full weight
+    svd_tail_damping: float = 0.01 # weight for modes beyond top_k (0=truncate, 1=keep)
+    bae_subtract_mean: bool = True # subtract mean mismatch from d_meas
+    bae_reweight: bool = True      # reweight rays by 1/sigma^2
+
     # --- Early Stopping ---
     early_stopping: bool = False
     patience: int = 100             # stop if no val improvement for this many steps
