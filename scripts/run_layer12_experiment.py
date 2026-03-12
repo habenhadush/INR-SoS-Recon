@@ -20,6 +20,7 @@ import sys
 import time
 import logging
 import json
+import yaml
 from pathlib import Path
 from datetime import datetime
 
@@ -38,6 +39,36 @@ from inr_sos.io.paths import DATA_DIR
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s:%(name)s:%(message)s")
 logger = logging.getLogger(__name__)
+
+SCRIPTS_DIR = Path(__file__).parent
+
+
+def load_dataset_config(key: str = None) -> dict:
+    """Load dataset config from scripts/datasets.yaml.
+
+    Reuses the same pattern as run_sweep.py.
+    """
+    cfg_path = SCRIPTS_DIR / "datasets.yaml"
+    with open(cfg_path) as f:
+        cfg = yaml.safe_load(f)
+    key = key or cfg["active"]
+    ds = cfg["datasets"][key]
+    ds["key"] = key
+    ds["data_path"] = DATA_DIR + ds["data_file"]
+    return ds
+
+
+def load_dataset(ds_cfg: dict) -> USDataset:
+    """Load USDataset from dataset config dict."""
+    data_file = ds_cfg["data_path"]
+    grid_file = DATA_DIR + "/DL-based-SoS/forward_model_lr/grid_parameters.mat"
+
+    if not ds_cfg.get("has_A_matrix", True) and "matrix_file" in ds_cfg:
+        matrix_path = DATA_DIR + ds_cfg["matrix_file"]
+        logger.info(f"External L-matrix: {matrix_path}")
+        return USDataset(data_file, grid_file, matrix_path=matrix_path)
+    else:
+        return USDataset(data_file, grid_file)
 
 
 def build_model(config):
@@ -132,18 +163,20 @@ def main():
     parser.add_argument("--model_type", type=str, default="SirenMLP", help="Model architecture")
     parser.add_argument("--svd_top_k", type=int, default=3800, help="SVD: keep top-k modes")
     parser.add_argument("--svd_tail_damping", type=float, default=0.01, help="SVD: tail weight")
+    parser.add_argument("--dataset", type=str, default=None,
+                        help="Dataset key from datasets.yaml (default: uses 'active' field)")
     parser.add_argument("--output_dir", type=str, default="layer12_results", help="Output directory")
     args = parser.parse_args()
 
     output_dir = Path(args.output_dir)
     output_dir.mkdir(exist_ok=True)
 
-    # --- Load dataset ---
-    data_file = f"{DATA_DIR}/DL-based-SoS/test_kWaveGeom_l2rec_l1rec_unifiedvar.mat"
-    grid_file = f"{DATA_DIR}/DL-based-SoS/grid_parameters.mat"
+    # --- Load dataset from datasets.yaml ---
+    ds_cfg = load_dataset_config(args.dataset)
+    logger.info(f"Dataset: {ds_cfg['name']} ({ds_cfg['key']})")
+    logger.info(f"Data file: {ds_cfg['data_path']}")
 
-    logger.info(f"Loading kwave_geom from {data_file}")
-    dataset = USDataset(data_file, grid_file)
+    dataset = load_dataset(ds_cfg)
     L_matrix = dataset.L_matrix
     N_total = len(dataset)
     n_test = min(args.n_test, N_total)
