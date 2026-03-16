@@ -8,7 +8,7 @@ from inr_sos.evaluation.metrics import calculate_metrics
 from inr_sos.utils.config import ExperimentConfig
 from inr_sos.utils.tracker import save_artifacts, log_to_local_database
 
-from inr_sos.models.mlp import FourierMLP, ReluMLP
+from inr_sos.models.mlp import FourierMLP, ReluMLP, GeluMLP
 from inr_sos.models.siren import SirenMLP
 from inr_sos.training.engines import (
     optimize_full_forward_operator,
@@ -26,6 +26,7 @@ _DEFAULT_MODELS = {
     "ReluMLP":   ReluMLP,
     "FourierMLP": FourierMLP,
     "SirenMLP":  SirenMLP,
+    "GeluMLP":   GeluMLP,
 }
 
 logging.basicConfig(
@@ -53,7 +54,7 @@ def _build_model(model_cls, model_name: str, cfg: ExperimentConfig):
             mapping_size=cfg.mapping_size,
             omega=cfg.omega,
         )
-    elif model_name == "ReluMLP":
+    elif model_name in ("ReluMLP", "GeluMLP"):
         return model_cls(
             in_features=cfg.in_features,
             hidden_features=cfg.hidden_features,
@@ -426,7 +427,7 @@ def run_evaluation(
                 mapping_size=current_config.mapping_size,
                 omega=current_config.omega
             )
-        elif current_config.model_type == "ReluMLP":
+        elif current_config.model_type in ("ReluMLP", "GeluMLP"):
             model = model_class(
                 in_features=current_config.in_features,
                 hidden_features=current_config.hidden_features,

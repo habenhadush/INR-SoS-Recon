@@ -1,4 +1,4 @@
-active: kwave_geom
+active: kwave_blob
 
 datasets:
   inverse_crime:
@@ -12,7 +12,7 @@ datasets:
       time_scale: 1e6
       parameters:
         method: ["Full_Matrix", "Sequential_SGD", "Ray_Batching"]
-        model_type: ["FourierMLP", "ReluMLP", "SirenMLP"]
+        model_type: ["FourierMLP", "ReluMLP", "SirenMLP", "GeluMLP"]
         hidden_features: [128, 256, 512]
         hidden_layers: [2, 3, 4, 5]
         lr: {distribution: "log_uniform_values", min: 1e-5, max: 1e-3}
@@ -36,7 +36,7 @@ datasets:
       time_scale: "auto"
       parameters:
         method: ["Full_Matrix", "Sequential_SGD"]
-        model_type: ["FourierMLP", "ReluMLP", "SirenMLP"]
+        model_type: ["FourierMLP", "ReluMLP", "SirenMLP", "GeluMLP"]
         hidden_features: [128, 256, 512]
         hidden_layers: [2, 3, 4, 5]
         lr: {distribution: "log_uniform_values", min: 1e-6, max: 1e-3}
@@ -60,14 +60,161 @@ datasets:
     data_file: "/DL-based-SoS/test_kWaveBlob_final.mat"
     has_baselines: true
     has_A_matrix: false
-    matrix_file: "/DL-based-SoS/forward_model_lr/L.mat"
-    notes: "Full-wave, NO A matrix — requires external L from forward_model_lr/"
+    matrix_file: "/DL-based-SoS/A.mat"
+    pix2time: 4.966887417218542e-08
+    notes: "Full-wave, NO A matrix — requires external dense A.mat. pix2time from kwave_geom (same transducer geometry)."
     sweep:
       n_eval_samples: 12
       time_scale: "auto"
       parameters:
         method: ["Full_Matrix", "Sequential_SGD"]
-        model_type: ["FourierMLP", "ReluMLP", "SirenMLP"]
+        model_type: ["FourierMLP", "ReluMLP", "SirenMLP", "GeluMLP"]
+        hidden_features: [128, 256, 512]
+        hidden_layers: [2, 3, 4, 5]
+        lr: {distribution: "log_uniform_values", min: 1e-6, max: 1e-3}
+        steps: [200, 500, 750, 1000]
+        tv_weight: {distribution: "log_uniform_values", min: 1e-3, max: 1.0}
+        reg_weight: {distribution: "log_uniform_values", min: 1e-4, max: 1e-1}
+        loss_type: ["mse", "huber"]
+        huber_delta: {distribution: "log_uniform_values", min: 0.01, max: 2.0}
+        clamp_slowness: [true, false]
+        early_stopping: [true]
+        patience: [50, 100, 200]
+        mapping_size: [32, 64, 128]
+        scale: {distribution: "uniform", min: 0.1, max: 5.0}
+        omega: {distribution: "uniform", min: 10.0, max: 60.0}
+        epochs: [100, 150, 200]
+        batch_size: [2048, 4096, 8192]
+        time_scale: [1e6, 2e7]
+
+  kwave_arranged:
+    name: "k-Wave Arranged Measurements (train)"
+    data_file: "/DL-based-SoS/arranged_allmeas_pred_train_networkoutts25.mat"
+    has_baselines: false
+    has_A_matrix: false
+    matrix_file: "/DL-based-SoS/A.mat"
+    pix2time: 4.966887417218542e-08
+    notes: "Measurement-only dataset. No baselines, no embedded A. External dense A.mat. Same transducer as kwave_geom/blob."
+    # Override HDF5 keys if different from defaults (measmnts, imgs_gt, nanidx).
+    # Only specify keys that differ — unspecified keys use defaults.
+    # h5_keys:
+    #   measurements: "measmnts"
+    #   ground_truth: "imgs_gt"
+    #   nan_mask: "nanidx"
+
+  # ── Denoised datasets ──────────────────────────────────────────────────
+  # U-Net and Diffusion denoised versions of kwave_geom and kwave_blob.
+  # Same transducer geometry → same A.mat and pix2time.
+  # Use compare_topk with existing kwave_geom/kwave_blob sweep configs first.
+
+  kwave_geom_unet:
+    name: "k-Wave Geometry — U-Net Denoised"
+    data_file: "/DL-based-SoS/PLACEHOLDER_geom_unet.mat"
+    has_baselines: false
+    has_A_matrix: true
+    pix2time: 4.966887417218542e-08
+    notes: "U-Net denoised displacement field of kwave_geom. Same GT and mask structure."
+    sweep:
+      n_eval_samples: 12
+      time_scale: "auto"
+      parameters:
+        method: ["Full_Matrix", "Sequential_SGD"]
+        model_type: ["FourierMLP", "ReluMLP", "SirenMLP", "GeluMLP"]
+        hidden_features: [128, 256, 512]
+        hidden_layers: [2, 3, 4, 5]
+        lr: {distribution: "log_uniform_values", min: 1e-6, max: 1e-3}
+        steps: [200, 500, 750, 1000]
+        tv_weight: {distribution: "log_uniform_values", min: 1e-3, max: 1.0}
+        reg_weight: {distribution: "log_uniform_values", min: 1e-4, max: 1e-1}
+        loss_type: ["mse", "huber"]
+        huber_delta: {distribution: "log_uniform_values", min: 0.01, max: 2.0}
+        clamp_slowness: [true, false]
+        early_stopping: [true]
+        patience: [50, 100, 200]
+        mapping_size: [32, 64, 128]
+        scale: {distribution: "uniform", min: 0.1, max: 5.0}
+        omega: {distribution: "uniform", min: 10.0, max: 60.0}
+        epochs: [100, 150, 200]
+        batch_size: [2048, 4096, 8192]
+        time_scale: [1e6, 2e7]
+
+  kwave_geom_diffusion:
+    name: "k-Wave Geometry — Diffusion Denoised"
+    data_file: "/DL-based-SoS/PLACEHOLDER_geom_diffusion.mat"
+    has_baselines: false
+    has_A_matrix: true
+    pix2time: 4.966887417218542e-08
+    notes: "Diffusion-model denoised displacement field of kwave_geom. Same GT and mask structure."
+    sweep:
+      n_eval_samples: 12
+      time_scale: "auto"
+      parameters:
+        method: ["Full_Matrix", "Sequential_SGD"]
+        model_type: ["FourierMLP", "ReluMLP", "SirenMLP", "GeluMLP"]
+        hidden_features: [128, 256, 512]
+        hidden_layers: [2, 3, 4, 5]
+        lr: {distribution: "log_uniform_values", min: 1e-6, max: 1e-3}
+        steps: [200, 500, 750, 1000]
+        tv_weight: {distribution: "log_uniform_values", min: 1e-3, max: 1.0}
+        reg_weight: {distribution: "log_uniform_values", min: 1e-4, max: 1e-1}
+        loss_type: ["mse", "huber"]
+        huber_delta: {distribution: "log_uniform_values", min: 0.01, max: 2.0}
+        clamp_slowness: [true, false]
+        early_stopping: [true]
+        patience: [50, 100, 200]
+        mapping_size: [32, 64, 128]
+        scale: {distribution: "uniform", min: 0.1, max: 5.0}
+        omega: {distribution: "uniform", min: 10.0, max: 60.0}
+        epochs: [100, 150, 200]
+        batch_size: [2048, 4096, 8192]
+        time_scale: [1e6, 2e7]
+
+  kwave_blob_unet:
+    name: "k-Wave Blob — U-Net Denoised"
+    data_file: "/DL-based-SoS/PLACEHOLDER_blob_unet.mat"
+    has_baselines: false
+    has_A_matrix: false
+    matrix_file: "/DL-based-SoS/A.mat"
+    pix2time: 4.966887417218542e-08
+    notes: "U-Net denoised displacement field of kwave_blob. External dense A.mat."
+    sweep:
+      n_eval_samples: 12
+      time_scale: "auto"
+      parameters:
+        method: ["Full_Matrix", "Sequential_SGD"]
+        model_type: ["FourierMLP", "ReluMLP", "SirenMLP", "GeluMLP"]
+        hidden_features: [128, 256, 512]
+        hidden_layers: [2, 3, 4, 5]
+        lr: {distribution: "log_uniform_values", min: 1e-6, max: 1e-3}
+        steps: [200, 500, 750, 1000]
+        tv_weight: {distribution: "log_uniform_values", min: 1e-3, max: 1.0}
+        reg_weight: {distribution: "log_uniform_values", min: 1e-4, max: 1e-1}
+        loss_type: ["mse", "huber"]
+        huber_delta: {distribution: "log_uniform_values", min: 0.01, max: 2.0}
+        clamp_slowness: [true, false]
+        early_stopping: [true]
+        patience: [50, 100, 200]
+        mapping_size: [32, 64, 128]
+        scale: {distribution: "uniform", min: 0.1, max: 5.0}
+        omega: {distribution: "uniform", min: 10.0, max: 60.0}
+        epochs: [100, 150, 200]
+        batch_size: [2048, 4096, 8192]
+        time_scale: [1e6, 2e7]
+
+  kwave_blob_diffusion:
+    name: "k-Wave Blob — Diffusion Denoised"
+    data_file: "/DL-based-SoS/PLACEHOLDER_blob_diffusion.mat"
+    has_baselines: false
+    has_A_matrix: false
+    matrix_file: "/DL-based-SoS/A.mat"
+    pix2time: 4.966887417218542e-08
+    notes: "Diffusion-model denoised displacement field of kwave_blob. External dense A.mat."
+    sweep:
+      n_eval_samples: 12
+      time_scale: "auto"
+      parameters:
+        method: ["Full_Matrix", "Sequential_SGD"]
+        model_type: ["FourierMLP", "ReluMLP", "SirenMLP", "GeluMLP"]
         hidden_features: [128, 256, 512]
         hidden_layers: [2, 3, 4, 5]
         lr: {distribution: "log_uniform_values", min: 1e-6, max: 1e-3}

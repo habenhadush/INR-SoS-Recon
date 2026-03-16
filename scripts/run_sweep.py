@@ -49,7 +49,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 
 LOG_DIR       = Path(__file__).parent
-REGISTRY_FILE = LOG_DIR / "sweep_registry.json"
+REGISTRY_FILE = LOG_DIR / "sweep_registry.json"  # default, overridable via --registry_file
 SCRIPTS_DIR   = Path(__file__).parent
 
 
@@ -90,16 +90,17 @@ def setup_logging(sweep_id: str) -> Path:
     return log_path
 
 
-def update_registry(sweep_id: str, updates: dict):
+def update_registry(sweep_id: str, updates: dict, registry_file: Path = None):
     """Patch the registry entry for this sweep_id."""
-    if not REGISTRY_FILE.exists():
+    reg_path = registry_file or REGISTRY_FILE
+    if not reg_path.exists():
         return
-    with open(REGISTRY_FILE) as f:
+    with open(reg_path) as f:
         registry = json.load(f)
     for entry in registry:
         if entry["sweep_id"] == sweep_id:
             entry.update(updates)
-    with open(REGISTRY_FILE, "w") as f:
+    with open(reg_path, "w") as f:
         json.dump(registry, f, indent=2)
 
 
@@ -115,7 +116,12 @@ def main():
                         help="Dataset sample indices to evaluate on. "
                              "If omitted, n_eval_samples random indices are chosen.")
     parser.add_argument("--project",   default="INR-SoS-Recon")
+    parser.add_argument("--registry_file", default=None,
+                        help="Local registry JSON (avoids race conditions in parallel mode)")
     args = parser.parse_args()
+
+    # Resolve registry file
+    reg_file = Path(args.registry_file) if args.registry_file else REGISTRY_FILE
 
     log_path = setup_logging(args.sweep_id)
     log      = logging.getLogger(__name__)
@@ -132,7 +138,7 @@ def main():
         "status":     "running",
         "started_at": datetime.now().isoformat(),
         "log_file":   str(log_path),
-    })
+    }, registry_file=reg_file)
 
     # ── Load dataset config from yaml ─────────────────────────────────────
     ds_cfg = load_dataset_config(args.dataset)
@@ -146,9 +152,14 @@ def main():
 
     # ── Compute time_scale ────────────────────────────────────────────────
     if yaml_time_scale == "auto":
-        auto_ts = compute_auto_time_scale(data_file)
-        log.info(f"time_scale  : auto → {auto_ts:.2e} (from pix2time)")
-        base_time_scale = auto_ts
+        # Try pix2time from yaml first, then from .mat file
+        yaml_pix2time = ds_cfg.get("pix2time")
+        if yaml_pix2time is not None:
+            base_time_scale = 1.0 / float(yaml_pix2time)
+            log.info(f"time_scale  : auto → {base_time_scale:.2e} (from yaml pix2time)")
+        else:
+            base_time_scale = compute_auto_time_scale(data_file)
+            log.info(f"time_scale  : auto → {base_time_scale:.2e} (from .mat pix2time)")
     else:
         base_time_scale = float(yaml_time_scale)
         log.info(f"time_scale  : {base_time_scale:.2e} (from yaml)")
@@ -157,13 +168,15 @@ def main():
     grid_file = DATA_DIR + "/DL-based-SoS/forward_model_lr/grid_parameters.mat"
 
     log.info("Loading dataset ...")
+    h5_keys = ds_cfg.get("h5_keys")
     # Handle datasets without embedded A matrix
     if not ds_cfg.get("has_A_matrix", True) and "matrix_file" in ds_cfg:
         matrix_path = DATA_DIR + ds_cfg["matrix_file"]
         log.info(f"External L  : {matrix_path}")
-        dataset = USDataset(data_file, grid_file, matrix_path=matrix_path)
+        dataset = USDataset(data_file, grid_file, matrix_path=matrix_path,
+                            use_external_L_matrix=True, h5_keys=h5_keys)
     else:
-        dataset = USDataset(data_file, grid_file)
+        dataset = USDataset(data_file, grid_file, h5_keys=h5_keys)
     log.info(f"Dataset loaded — {len(dataset)} samples")
 
     # ── Sample indices ────────────────────────────────────────────────────
@@ -178,7 +191,7 @@ def main():
     update_registry(args.sweep_id, {
         "indices": indices,
         "dataset": ds_cfg["key"],
-    })
+    }, registry_file=reg_file)
 
     # ── Base config (minimal — sweep overrides everything) ────────────────
     base_config = ExperimentConfig(
@@ -189,8 +202,8 @@ def main():
 
     # ── Read entity/project from registry (set by create_sweep.py) ───────
     registry = []
-    if REGISTRY_FILE.exists():
-        with open(REGISTRY_FILE) as f:
+    if reg_file.exists():
+        with open(reg_file) as f:
             registry = json.load(f)
     reg_entry = next(
         (e for e in registry if e["sweep_id"] == args.sweep_id), {}
@@ -220,18 +233,19 @@ def main():
             "status":      "done",
             "finished_at": datetime.now().isoformat(),
             "elapsed_hrs": round(elapsed, 2),
-        })
+        }, registry_file=reg_file)
 
     except KeyboardInterrupt:
         log.warning("Interrupted by user (Ctrl+C)")
-        update_registry(args.sweep_id, {"status": "interrupted"})
+        update_registry(args.sweep_id, {"status": "interrupted"},
+                        registry_file=reg_file)
 
     except Exception as e:
         log.error(f"Sweep failed: {e}", exc_info=True)
         update_registry(args.sweep_id, {
             "status": "failed",
             "error":  str(e),
-        })
+        }, registry_file=reg_file)
         sys.exit(1)
 
 

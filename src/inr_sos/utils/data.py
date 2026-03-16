@@ -8,25 +8,42 @@ from inr_sos.io.utils import load_mat, load_metadata
 from inr_sos.utils.params import USGrid
 import logging
 
+_DEFAULT_H5_KEYS = {
+    "measurements": "measmnts",
+    "ground_truth": "imgs_gt",
+    "nan_mask":     "nanidx",
+}
+
+
 class USDataset(Dataset):
 
-    def __init__(self, data_path, grid_path, matrix_path=None, use_external_L_matrix=False, paths_per_batch=None):
+    def __init__(self, data_path, grid_path, matrix_path=None,
+                 use_external_L_matrix=False, paths_per_batch=None,
+                 h5_keys=None):
         """
         PyTorch Dataset for Speed-of-Sound Inversion.
-        
+
         Parameters
         ----------
         data_path : str
-            Path to 'train-VS-8pairs-IC-081225.mat'
+            Path to HDF5 data file.
         grid_path : str
             Path to 'grid_parameters.mat'
         matrix_path : str (Optional)
-            Path to 'L.mat' or derived from data file. 
+            Path to external L-matrix file.
             If None, attempts to load 'A' from data_path.
+        h5_keys : dict (Optional)
+            Override HDF5 key names. Supported keys:
+              "measurements" : measurement displacement field  (default: "measmnts")
+              "ground_truth" : ground truth slowness images    (default: "imgs_gt")
+              "nan_mask"     : NaN/invalid ray mask            (default: "nanidx")
         """
         self.data_path = Path(data_path)
         self.h5_file = None  # Will be used for lazy loading
         self.paths_per_batch = paths_per_batch
+
+        # Merge caller overrides onto defaults
+        self.h5_keys = {**_DEFAULT_H5_KEYS, **(h5_keys or {})}
 
         # 1. SETUP GEOMETRY
         # Load grid parameters to handle coordinate normalization
@@ -57,9 +74,20 @@ class USDataset(Dataset):
                 logging.error("matrix_path must be provided when use_external_L_matrix is True.")
             logging.info("Loading L-Matrix from external file: {}".format(matrix_path))
             L_data = load_mat(matrix_path)
-            if 'L' not in L_data:
-                logging.error("Matrix 'L' not found in the provided matrix file.")
-            self.L_matrix = torch.tensor(L_data['L'], dtype=torch.float32)
+            if 'L' in L_data:
+                raw = L_data['L']
+            elif 'A' in L_data:
+                raw = L_data['A']
+                logging.info("Found key 'A' (not 'L') in external matrix file.")
+            else:
+                raise ValueError(
+                    f"External matrix file has neither 'L' nor 'A' key. "
+                    f"Available keys: {list(L_data.keys())}"
+                )
+            raw = np.array(raw)
+            if raw.shape[0] < raw.shape[1]:
+                raw = raw.T
+            self.L_matrix = torch.tensor(raw, dtype=torch.float32)
             logging.info("L-Matrix loaded successfully with shape: {}".format(self.L_matrix.shape))
         else:
             logging.info(f"Loading L-Matrix from data file: {self.data_path}")
@@ -106,8 +134,21 @@ class USDataset(Dataset):
 
         # 4. GET DATASET LENGTH & LOAD OPTIONAL FIELDS
         with h5py.File(self.data_path, 'r') as f:
-            self.length = f['measmnts'].shape[0]
-            logging.info("Dataset initialized with {} samples.".format(self.length))
+            self.length = f[self.h5_keys["measurements"]].shape[0]
+            self.has_ground_truth = self.h5_keys["ground_truth"] in f
+            self.has_nan_mask = self.h5_keys["nan_mask"] in f
+            if not self.has_ground_truth:
+                logging.warning(
+                    f"Ground truth key '{self.h5_keys['ground_truth']}' not found. "
+                    f"Metrics requiring GT will be unavailable."
+                )
+            if not self.has_nan_mask:
+                logging.warning(
+                    f"NaN mask key '{self.h5_keys['nan_mask']}' not found. "
+                    f"Mask will be derived from NaN values in measurements."
+                )
+            logging.info("Dataset initialized with {} samples (GT={}).".format(
+                self.length, self.has_ground_truth))
 
             # Optional benchmark reconstructions
             if 'all_slowness_recons_l1' in f:
@@ -175,23 +216,38 @@ class USDataset(Dataset):
         """
         self._open_h5_file()
 
-        # A. Load Ground Truth (4096, 1)
-        s_raw = self.h5_file['imgs_gt'][idx] 
-        s_vec = torch.tensor(s_raw.flatten(), dtype=torch.float32).unsqueeze(1)
-        
-        s_mean = s_vec.mean()
-        s_std = s_vec.std()
-        s_normalized = (s_vec - s_mean) / (s_std + 1e-8)
-        
-        # B. Load Measurements and Mask
-        d_vec = torch.tensor(self.h5_file['measmnts'][idx], dtype=torch.float32).unsqueeze(1)
+        # A. Load Ground Truth (4096, 1) — optional
+        if self.has_ground_truth:
+            s_raw = self.h5_file[self.h5_keys["ground_truth"]][idx]
+            s_vec = torch.tensor(s_raw.flatten(), dtype=torch.float32).unsqueeze(1)
+            s_mean = s_vec.mean()
+            s_std = s_vec.std()
+            s_normalized = (s_vec - s_mean) / (s_std + 1e-8)
+        else:
+            # No GT — use background slowness (from metadata or default 1540 m/s)
+            bg_sos = self.bf_sos if self.bf_sos else 1540.0
+            bg_slowness = 1.0 / bg_sos
+            s_mean = torch.tensor(bg_slowness, dtype=torch.float32)
+            s_std = torch.tensor(bg_slowness * 0.02, dtype=torch.float32)
+            s_vec = None
+            s_normalized = None
 
-        # issue with k-wave data: some entries are NaN due to non-physical paths. We provide a mask to ignore these during training.
-        d_vec = torch.nan_to_num(d_vec, nan=0.0)  # Replace NaNs with 0 for stability
-        
-        nan_vals = self.h5_file['nanidx'][idx]
-        mask_vec = torch.tensor(1.0 - nan_vals, dtype=torch.float32).unsqueeze(1)
-    
+        # B. Load Measurements and Mask
+        d_raw = torch.tensor(
+            self.h5_file[self.h5_keys["measurements"]][idx],
+            dtype=torch.float32,
+        ).unsqueeze(1)
+
+        if self.has_nan_mask:
+            nan_vals = self.h5_file[self.h5_keys["nan_mask"]][idx]
+            mask_vec = torch.tensor(1.0 - nan_vals, dtype=torch.float32).unsqueeze(1)
+        else:
+            # Derive mask from NaN values in measurements
+            mask_vec = (~torch.isnan(d_raw)).float()
+
+        # k-wave data: some entries are NaN due to non-physical paths
+        d_vec = torch.nan_to_num(d_raw, nan=0.0)
+
         sample = {
             'coords': self.coords_norm,
             's_gt_raw': s_vec,

@@ -162,7 +162,7 @@ def run_sweep_agent(
     project        : W&B project name. If None, uses base_config.project_name.
     """
     project = project or base_config.project_name
-    from inr_sos.models.mlp import FourierMLP, ReluMLP
+    from inr_sos.models.mlp import FourierMLP, ReluMLP, GeluMLP
     from inr_sos.models.siren import SirenMLP
     from inr_sos.training.engines import (
         optimize_full_forward_operator,
@@ -179,6 +179,7 @@ def run_sweep_agent(
         "FourierMLP": FourierMLP,
         "ReluMLP":    ReluMLP,
         "SirenMLP":   SirenMLP,
+        "GeluMLP":    GeluMLP,
     }
 
     def _sweep_train_fn():

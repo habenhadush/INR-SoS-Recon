@@ -9,22 +9,45 @@ class ReluMLP(nn.Module):
     """
     def __init__(self, in_features=2, hidden_features=256, hidden_layers=3, out_features=1, mapping_size=64):
         super().__init__()
-        
+
         layers = []
         # 1. Input Layer
         layers.append(nn.Linear(in_features, hidden_features))
         layers.append(nn.ReLU())
-        
+
         # 2. Hidden Layers
         for _ in range(hidden_layers):
             layers.append(nn.Linear(hidden_features, hidden_features))
             layers.append(nn.ReLU())
-            
+
         # 3. Output Layer (No activation for regression)
         layers.append(nn.Linear(hidden_features, out_features))
-        
+
         self.net = nn.Sequential(*layers)
-        
+
+    def forward(self, coords):
+        return self.net(coords)
+
+
+class GeluMLP(nn.Module):
+    """
+    GELU MLP: Smooth activation, often better gradient flow than ReLU.
+    """
+    def __init__(self, in_features=2, hidden_features=256, hidden_layers=3, out_features=1, mapping_size=64):
+        super().__init__()
+
+        layers = []
+        layers.append(nn.Linear(in_features, hidden_features))
+        layers.append(nn.GELU())
+
+        for _ in range(hidden_layers):
+            layers.append(nn.Linear(hidden_features, hidden_features))
+            layers.append(nn.GELU())
+
+        layers.append(nn.Linear(hidden_features, out_features))
+
+        self.net = nn.Sequential(*layers)
+
     def forward(self, coords):
         return self.net(coords)
     

@@ -269,7 +269,7 @@ def compute_embedded_baseline_metrics(dataset, indices, label, sample_key, log) 
 # INR runner
 def run_inr_config(sweep_cfg, dataset, indices, base_config, run_tag, log,
                    warm_init: bool = False, wb_group=None) -> dict:
-    from inr_sos.models.mlp import FourierMLP, ReluMLP
+    from inr_sos.models.mlp import FourierMLP, ReluMLP, GeluMLP
     from inr_sos.models.siren import SirenMLP
     from inr_sos.training.engines import (
         optimize_full_forward_operator,
@@ -282,7 +282,7 @@ def run_inr_config(sweep_cfg, dataset, indices, base_config, run_tag, log,
         "Sequential_SGD": optimize_sequential_views,
         "Ray_Batching":   optimize_stochastic_ray_batching,
     }
-    model_map = {"FourierMLP": FourierMLP, "ReluMLP": ReluMLP, "SirenMLP": SirenMLP}
+    model_map = {"FourierMLP": FourierMLP, "ReluMLP": ReluMLP, "SirenMLP": SirenMLP, "GeluMLP": GeluMLP}
 
     rank    = sweep_cfg["rank"]
     method  = sweep_cfg["method"]
@@ -686,7 +686,8 @@ def make_reconstruction_grid(all_results: list,
 
 
 # W&B summary run
-def log_summary_to_wandb(all_results, entry, indices, run_tag, sweep_id, log, wb_group=None):
+def log_summary_to_wandb(all_results, entry, indices, run_tag, sweep_id, log,
+                         wb_group=None, plot_dir=None):
     wb_name = f"{run_tag}_SUMMARY"
     log.info(f"\n  Logging summary → W&B '{wb_name}'")
 
@@ -722,12 +723,15 @@ def log_summary_to_wandb(all_results, entry, indices, run_tag, sweep_id, log, wb
     )
     wandb.log({"comparison_table": table})
 
+    # Per-sweep plot folder
+    out_dir = plot_dir or (PLOT_DIR / sweep_id)
+    out_dir.mkdir(parents=True, exist_ok=True)
+
     # Box plots — in-memory to W&B
     log.info("  Rendering box plots ...")
     fig_bp = make_boxplots(all_results)
     wandb.log({"boxplots": _fig_to_wandb_image(fig_bp, "Metric distributions")})
-    # Also save PDF for thesis
-    pdf_path = PLOT_DIR / f"{run_tag}_boxplots.pdf"
+    pdf_path = out_dir / f"{run_tag}_boxplots.pdf"
     fig_bp.savefig(pdf_path, dpi=150, bbox_inches="tight")
     plt.close(fig_bp)
     log.info(f"  Box plot PDF → {pdf_path}")
@@ -737,7 +741,7 @@ def log_summary_to_wandb(all_results, entry, indices, run_tag, sweep_id, log, wb
     fig_grid = make_reconstruction_grid(all_results, n_visual_samples=2)
     wandb.log({"reconstruction_grid": _fig_to_wandb_image(
         fig_grid, "GT vs all methods — 2 random samples")})
-    pdf_grid = PLOT_DIR / f"{run_tag}_recon_grid.pdf"
+    pdf_grid = out_dir / f"{run_tag}_recon_grid.pdf"
     fig_grid.savefig(pdf_grid, dpi=150, bbox_inches="tight")
     plt.close(fig_grid)
     log.info(f"  Reconstruction grid PDF → {pdf_grid}")
@@ -782,6 +786,8 @@ def main():
         matrix_file = ds_cfg.get("matrix_file", "/DL-based-SoS/forward_model_lr/L.mat")
         ds_kwargs["matrix_path"] = DATA_DIR + matrix_file
         ds_kwargs["use_external_L_matrix"] = True
+    if ds_cfg.get("h5_keys"):
+        ds_kwargs["h5_keys"] = ds_cfg["h5_keys"]
     dataset = USDataset(ds_cfg["data_path"], grid_path, **ds_kwargs)
 
     # ── Resolve n_samples ─────────────────────────────────────────────────
@@ -829,19 +835,24 @@ def main():
             baseline_results.append(compute_embedded_baseline_metrics(
                 dataset, indices, "L1_regularization", "s_l1_recon", log))
     else:
-        log.info("\nLoading analytical baselines ...")
-        analytical = inr_sos.load_mat(
-            DATA_DIR + "/DL-based-SoS/train_IC_10k_l2rec_l1rec_imcon.mat"
-        )
-        baseline_results.append(compute_baseline_metrics(
-            analytical["all_slowness_recons_l2"], analytical["imgs_gt"],
-            indices, "L2_regularization", log))
-        baseline_results.append(compute_baseline_metrics(
-            analytical["all_slowness_recons_l1"], analytical["imgs_gt"],
-            indices, "L1_regularization", log))
+        log.info("\nNo baselines available for this dataset — skipping baseline comparison.")
 
     # ── Dataset config ────────────────────────────────────────────────────
-    base_config = ExperimentConfig(project_name=entry["project"])
+    # Resolve time_scale: dataset.pix2time > yaml pix2time > default
+    if hasattr(dataset, 'pix2time') and dataset.pix2time is not None:
+        resolved_time_scale = 1.0 / dataset.pix2time
+        log.info(f"time_scale from dataset pix2time: {resolved_time_scale:.4e}")
+    elif ds_cfg.get("pix2time") is not None:
+        resolved_time_scale = 1.0 / float(ds_cfg["pix2time"])
+        log.info(f"time_scale from yaml pix2time: {resolved_time_scale:.4e}")
+    else:
+        resolved_time_scale = 1e6
+        log.info(f"time_scale using default: {resolved_time_scale:.4e}")
+
+    base_config = ExperimentConfig(
+        project_name=entry["project"],
+        time_scale=resolved_time_scale,
+    )
 
     # ── Fetch configs from W&B ───────────────────────────────────────────
     api   = wandb.Api()
@@ -856,7 +867,7 @@ def main():
     if args.top_k_per_model:
         # ── Top-K per model type — ensures every architecture is represented ─
         k = args.top_k_per_model
-        model_types = ["ReluMLP", "FourierMLP", "SirenMLP"]
+        model_types = ["ReluMLP", "FourierMLP", "SirenMLP", "GeluMLP"]
         selected = []
         for mtype in model_types:
             pool = [r for r in completed if r.config.get("model_type") == mtype]
