@@ -52,12 +52,13 @@ from inr_sos import DATA_DIR
 from inr_sos.utils.data import USDataset
 from inr_sos.utils.config import ExperimentConfig
 from inr_sos.evaluation.metrics import calculate_metrics
-from inr_sos.models.mlp import FourierMLP, ReluMLP, GeluMLP
+from inr_sos.models.mlp import FourierMLP, ReluMLP, GeluMLP, BiasMLP
 from inr_sos.models.siren import SirenMLP
 from inr_sos.training.engines import (
     optimize_full_forward_operator,
     optimize_sequential_views,
     optimize_stochastic_ray_batching,
+    optimize_with_bias_absorption,
 )
 
 SCRIPTS_DIR   = Path(__file__).parent
@@ -69,6 +70,7 @@ ENGINE_MAP = {
     "Full_Matrix":    optimize_full_forward_operator,
     "Sequential_SGD": optimize_sequential_views,
     "Ray_Batching":   optimize_stochastic_ray_batching,
+    "Bias_Absorption": optimize_with_bias_absorption,
 }
 MODEL_MAP = {
     "FourierMLP": FourierMLP,
@@ -221,8 +223,19 @@ def run_inr_config(sweep_cfg, dataset, indices, base_config, run_tag, log,
             warm_init_weights(model)
 
         t0 = time.perf_counter()
-        result = engine_fn(sample=sample, L_matrix=dataset.L_matrix,
-                           model=model, label=mtype, config=cfg, use_wandb=False)
+        if method == "Bias_Absorption":
+            bias_model = BiasMLP(
+                in_features=2, 
+                hidden_features=cfg.bias_hidden_features, 
+                mapping_size=32, 
+                scale=cfg.bias_scale
+            )
+            result = engine_fn(sample=sample, L_matrix=dataset.L_matrix,
+                               model=model, bias_model=bias_model, 
+                               label=mtype, config=cfg, use_wandb=False)
+        else:
+            result = engine_fn(sample=sample, L_matrix=dataset.L_matrix,
+                               model=model, label=mtype, config=cfg, use_wandb=False)
         recon_s = time.perf_counter() - t0
         recon_times.append(recon_s)
 
@@ -268,6 +281,11 @@ def run_inr_config(sweep_cfg, dataset, indices, base_config, run_tag, log,
             fig = _make_sample_plot(s_phys_np, s_gt_np if has_gt else None,
                                     result["loss_history"], idx, method, mtype,
                                     per_entry if has_gt else None)
+            
+            # Additional plot for the absorbed bias if applicable
+            if "epsilon_bias" in result:
+                _plot_absorbed_bias(result["epsilon_bias"], idx, method, mtype, plot_dir)
+
             fp = plot_dir / f"rank{rank}_{method}_{mtype}_idx{idx}.png"
             fig.savefig(fp, dpi=150, bbox_inches="tight")
             plt.close(fig)
@@ -363,6 +381,31 @@ def _make_sample_plot(s_phys_np, s_gt_np, loss_history, idx, method, mtype,
 
     plt.tight_layout()
     return fig
+
+
+def _plot_absorbed_bias(epsilon_bias, idx, method, mtype, plot_dir):
+    """Save a visualization of the bias field absorbed by the secondary INR."""
+    import matplotlib.pyplot as plt
+    import numpy as np
+    
+    eps_np = epsilon_bias.detach().cpu().numpy()
+    n_pairs = 8
+    pair_size = len(eps_np) // n_pairs
+    
+    fig, axes = plt.subplots(2, 4, figsize=(20, 10))
+    fig.suptitle(f"Absorbed Bias Field - {method}/{mtype} - Sample {idx}", fontsize=16)
+    
+    for p in range(n_pairs):
+        ax = axes[p // 4, p % 4]
+        pair_eps = eps_np[p * pair_size : (p + 1) * pair_size].reshape(128, 128, order='F')
+        im = ax.imshow(pair_eps, cmap='RdBu_r')
+        ax.set_title(f"Firing Pair {p}")
+        ax.axis('off')
+        plt.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
+    
+    plt.tight_layout()
+    plt.savefig(plot_dir / f"bias_absorbed_idx{idx}.png", dpi=150)
+    plt.close(fig)
 
 
 def _make_recon_grid(all_results, n_vis=2, rng_seed=42):

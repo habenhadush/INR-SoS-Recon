@@ -42,6 +42,13 @@ class ExperimentConfig:
     patience: int = 100             # stop if no val improvement for this many steps
     val_fraction: float = 0.1       # fraction of valid rays held out for validation
 
+    # --- Bias Absorption (Phase 1 Research) ---
+    use_bias_absorption: bool = False
+    bias_lr: float = 1e-3
+    bias_scale: float = 0.1         # bandwidth of the bias INR
+    bias_hidden_features: int = 64
+    bias_reg_weight: float = 1e-4
+
     def to_dict(self) -> dict:
         """Required for passing the config to wandb.init()"""
         return asdict(self)

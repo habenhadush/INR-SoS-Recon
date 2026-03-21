@@ -580,6 +580,112 @@ def optimize_sequential_views(sample, L_matrix, model, label, config: ec, use_wa
     }
 
 
+def optimize_with_bias_absorption(sample, L_matrix, model, bias_model, label, config: ec, use_wandb=False):
+    """Phase 1: Simultaneous Anatomy + Bias optimization.
+    
+    Decouples the smooth systematic model mismatch (bias) from the sharp anatomy.
+    """
+    logging.info(f"\n--- {inspect.currentframe().f_code.co_name}: Training {label} + BiasAbsorber on {_DEVICE} ---")
+
+    model  = model.to(_DEVICE)
+    bias_model = bias_model.to(_DEVICE)
+    
+    coords = sample['coords'].to(_DEVICE) # Anatomy coords (4096, 2)
+    d_meas = sample['d_meas'].to(_DEVICE) # Measurements (131072, 1)
+    mask   = sample['mask'].to(_DEVICE)   # Mask (131072, 1)
+    s_mean = sample['s_stats'][0].item()
+    s_std  = sample['s_stats'][1].item()
+    L      = L_matrix.to(_DEVICE)
+
+    # Generate Measurement Domain Coordinates (u, v) for the Bias INR
+    # We use (normalized_channel_idx, normalized_pair_idx)
+    num_rays = d_meas.shape[0]
+    n_pairs = 8
+    rays_per_pair = num_rays // n_pairs
+    
+    pair_indices = torch.arange(n_pairs, device=_DEVICE).repeat_interleave(rays_per_pair)
+    ray_indices = torch.arange(rays_per_pair, device=_DEVICE).repeat(n_pairs)
+    
+    # Normalize to [-1, 1]
+    u = 2.0 * (ray_indices.float() / (rays_per_pair - 1)) - 1.0
+    v = 2.0 * (pair_indices.float() / (n_pairs - 1)) - 1.0
+    bias_coords = torch.stack([u, v], dim=1) # (131072, 2)
+
+    # Combined parameters for optimizer
+    optimizer = optim.Adam([
+        {'params': model.parameters(), 'lr': config.lr},
+        {'params': bias_model.parameters(), 'lr': config.bias_lr}
+    ])
+    
+    scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=config.steps)
+
+    loss_history = []
+    pbar = tqdm(range(config.steps))
+
+    for step in pbar:
+        model.train()
+        bias_model.train()
+        optimizer.zero_grad()
+
+        # 1. Forward Anatomy
+        s_norm = model(coords)
+        s_phys = _maybe_clamp_slowness(s_norm * s_std + s_mean, config)
+        d_pred_geometric = L @ s_phys
+
+        # 2. Forward Bias (Model Mismatch)
+        epsilon_bias = bias_model(bias_coords)
+
+        # 3. Combined Prediction
+        d_total_pred = d_pred_geometric + epsilon_bias
+        
+        residual_seconds = d_total_pred - d_meas
+        loss_data = _compute_data_loss(residual_seconds, mask, config)
+
+        # 4. Regularization
+        reg_loss = 0
+        if config.reg_weight > 0:
+            reg_loss += config.reg_weight * (s_norm ** 2).mean()
+        
+        # Smoothness regularization on bias (L2 gradient penalty or weight decay)
+        if config.bias_reg_weight > 0:
+            reg_loss += config.bias_reg_weight * (epsilon_bias ** 2).mean()
+
+        total_loss = loss_data + reg_loss
+        total_loss.backward()
+        optimizer.step()
+        scheduler.step()
+
+        loss_history.append(total_loss.item())
+
+        if step % 50 == 0:
+            pbar.set_description(f"Loss: {loss_data.item():.4f} | BiasAvg: {epsilon_bias.abs().mean().item():.2e}")
+
+        if use_wandb:
+            wandb.log({
+                "Total Loss": total_loss.item(),
+                "Data Loss":  loss_data.item(),
+                "Bias Magnitude": epsilon_bias.abs().mean().item(),
+                "Anatomy LR": optimizer.param_groups[0]['lr'],
+                "Bias LR":    optimizer.param_groups[1]['lr']
+            }, step=step)
+
+    model.eval()
+    bias_model.eval()
+    with torch.no_grad():
+        s_norm = model(coords)
+        s_phys = _maybe_clamp_slowness(s_norm * s_std + s_mean, config)
+        epsilon_bias = bias_model(bias_coords)
+
+    return {
+        's_phys':       s_phys.detach().cpu(),
+        's_norm':       s_norm.detach().cpu(),
+        'epsilon_bias': epsilon_bias.detach().cpu(),
+        'loss_history': loss_history,
+        'model_state':  model.state_dict(),
+        'bias_state':   bias_model.state_dict()
+    }
+
+
 def optimize_stochastic_ray_batching(sample, L_matrix, model, label, config: ec, use_wandb=False):
     """Phase 3: Fast GPU Slicing.
 

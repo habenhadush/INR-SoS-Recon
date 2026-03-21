@@ -65,6 +65,38 @@ class GaussianFourierFeatureMapping(nn.Module):
         return torch.cat([torch.sin(x_proj), torch.cos(x_proj)], dim=-1)
     
 
+class BiasMLP(nn.Module):
+    """
+    Bias MLP: Designed to absorb smooth, systematic model mismatch.
+    Uses low-bandwidth encoding to prevent it from fitting high-frequency anatomy.
+    """
+    def __init__(self, in_features=2, hidden_features=64, hidden_layers=2, mapping_size=32, scale=0.1):
+        super().__init__()
+        
+        # Low-bandwidth Fourier encoding
+        self.encoder = GaussianFourierFeatureMapping(
+            in_features, 
+            mapping_size, 
+            scale
+        )
+        mlp_input_dim = mapping_size * 2
+
+        layers = []
+        layers.append(nn.Linear(mlp_input_dim, hidden_features))
+        layers.append(nn.Tanh()) # Tanh for smoother gradients in bias absorption
+
+        for _ in range(hidden_layers - 1):
+            layers.append(nn.Linear(hidden_features, hidden_features))
+            layers.append(nn.Tanh())
+
+        layers.append(nn.Linear(hidden_features, 1))
+        self.net = nn.Sequential(*layers)
+
+    def forward(self, coords):
+        features = self.encoder(coords)
+        return self.net(features)
+
+
 class FourierMLP(nn.Module):
 
     def __init__(self, in_features=2, hidden_features=256, hidden_layers=3, mapping_size=64, scale=10):
