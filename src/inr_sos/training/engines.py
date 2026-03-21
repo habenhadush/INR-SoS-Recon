@@ -325,6 +325,103 @@ def reconstruct_no_optimal(sample, L_matrix, model, label, config):
 """
 
 
+def optimize_with_svd_constraint(sample, L_matrix, model, label, config: ec, use_wandb=False):
+    """Phase 2: SVD-Constrained Reconstruction.
+    
+    Restricts the anatomy field to the stable subspace of the L-matrix
+    to prevent error amplification.
+    """
+    logging.info(f"\n--- {inspect.currentframe().f_code.co_name}: Training {label} + SVD-Constraint on {_DEVICE} ---")
+
+    model  = model.to(_DEVICE)
+    coords = sample['coords'].to(_DEVICE)
+    d_meas = sample['d_meas'].to(_DEVICE)
+    mask   = sample['mask'].to(_DEVICE)
+    s_mean = sample['s_stats'][0].item()
+    s_std  = sample['s_stats'][1].item()
+    L      = L_matrix.to(_DEVICE)
+
+    # Load SVD components (precomputed or computed on first call)
+    # Note: USDataset.load_svd is called outside or here
+    # For efficiency, we assume Vt_k is provided or we get it from dataset
+    # Here we'll compute it if not available, but ideally it's passed in.
+    # Since we don't want to change the signature too much, we'll try to find it.
+    
+    # Precompute or load SVD
+    # In a real run, we'd use config.svd_path
+    if not hasattr(optimize_with_svd_constraint, "_Vt_k"):
+        # This is a bit hacky but keeps the signature consistent with other engines
+        # We assume the caller might have attached it to the model or we compute it once
+        logging.info("SVD components not cached in engine. Computing...")
+        L_np = L_matrix.numpy()
+        U, S, Vt = np.linalg.svd(L_np, full_matrices=False)
+        Vt_k = torch.tensor(Vt[:config.svd_k, :], dtype=torch.float32, device=_DEVICE)
+        optimize_with_svd_constraint._Vt_k = Vt_k
+    
+    Vt_k = optimize_with_svd_constraint._Vt_k
+
+    optimizer = optim.Adam(model.parameters(), lr=config.lr)
+    scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=config.steps)
+
+    loss_history = []
+    pbar = tqdm(range(config.steps))
+
+    for step in pbar:
+        model.train()
+        optimizer.zero_grad()
+
+        # 1. Forward Anatomy
+        s_norm = model(coords)
+        s_phys = s_norm * s_std + s_mean
+        
+        # 2. Project onto Stable Subspace
+        # s_stable = V_k @ (V_k^T @ s_phys)
+        # Note: s_phys is (4096, 1), Vt_k is (k, 4096)
+        s_stable = Vt_k.t() @ (Vt_k @ s_phys)
+        
+        s_stable_clamped = _maybe_clamp_slowness(s_stable, config)
+
+        # 3. Prediction and Loss
+        d_pred = L @ s_stable_clamped
+        residual_seconds = d_pred - d_meas
+        loss = _compute_data_loss(residual_seconds, mask, config)
+
+        reg_loss = 0
+        if config.reg_weight > 0:
+            reg_loss += config.reg_weight * (s_norm ** 2).mean()
+
+        total_loss = loss + reg_loss
+        total_loss.backward()
+        optimizer.step()
+        scheduler.step()
+
+        loss_history.append(total_loss.item())
+
+        if step % 50 == 0:
+            pbar.set_description(f"Loss: {loss.item():.4f}")
+
+        if use_wandb:
+            wandb.log({
+                "Total Loss": total_loss.item(),
+                "Data Loss":  loss.item(),
+                "Learning Rate": scheduler.get_last_lr()[0]
+            }, step=step)
+
+    model.eval()
+    with torch.no_grad():
+        s_norm = model(coords)
+        s_phys = s_norm * s_std + s_mean
+        s_stable = Vt_k.t() @ (Vt_k @ s_phys)
+        s_final = _maybe_clamp_slowness(s_stable, config)
+
+    return {
+        's_phys':       s_final.detach().cpu(),
+        's_norm':       s_norm.detach().cpu(),
+        'loss_history': loss_history,
+        'model_state':  model.state_dict()
+    }
+
+
 def optimize_direct_supervision(sample, L_matrix, model, label, config: ec, use_wandb=False):
     """Phase 1: Direct GT memorization (no forward model)."""
     logging.info(f"\n--- {inspect.currentframe().f_code.co_name}: Training {label} (Direct GT) on {_DEVICE} ---")
@@ -575,6 +672,84 @@ def optimize_sequential_views(sample, L_matrix, model, label, config: ec, use_wa
     return {
         's_phys':       s_phys.detach().cpu(),
         's_norm':       s_norm.detach().cpu(),
+        'loss_history': loss_history,
+        'model_state':  model.state_dict()
+    }
+
+
+def optimize_with_bias_absorption(sample, L_matrix, model, bias_model, label, config: ec, use_wandb=False):
+    """Phase 1: Simultaneous Anatomy + Bias optimization.
+    
+    Decouples the smooth systematic model mismatch (bias) from the sharp anatomy.
+    """
+    logging.info(f"\n--- {inspect.currentframe().f_code.co_name}: Training {label} + BiasAbsorber on {_DEVICE} ---")
+
+    model  = model.to(_DEVICE)
+    bias_model = bias_model.to(_DEVICE)
+    
+    coords = sample['coords'].to(_DEVICE) # Anatomy coords (4096, 2)
+    d_meas = sample['d_meas'].to(_DEVICE) # Measurements (131072, 1)
+    mask   = sample['mask'].to(_DEVICE)   # Mask (131072, 1)
+    s_mean = sample['s_stats'][0].item()
+    s_std  = sample['s_stats'][1].item()
+    L      = L_matrix.to(_DEVICE)
+
+    # Generate Measurement Domain Coordinates (u, v) for the Bias INR
+    num_rays = d_meas.shape[0]
+    n_pairs = 8
+    rays_per_pair = num_rays // n_pairs
+    
+    pair_indices = torch.arange(n_pairs, device=_DEVICE).repeat_interleave(rays_per_pair)
+    ray_indices = torch.arange(rays_per_pair, device=_DEVICE).repeat(n_pairs)
+    
+    # Normalize to [-1, 1]
+    u = 2.0 * (ray_indices.float() / (rays_per_pair - 1)) - 1.0
+    v = 2.0 * (pair_indices.float() / (n_pairs - 1)) - 1.0
+    bias_coords = torch.stack([u, v], dim=1) # (131072, 2)
+
+    optimizer = optim.Adam([
+        {'params': model.parameters(), 'lr': config.lr},
+        {'params': bias_model.parameters(), 'lr': config.bias_lr}
+    ])
+    
+    scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=config.steps)
+
+    loss_history = []
+    pbar = tqdm(range(config.steps))
+
+    for step in pbar:
+        model.train()
+        bias_model.train()
+        optimizer.zero_grad()
+
+        s_norm = model(coords)
+        s_phys = _maybe_clamp_slowness(s_norm * s_std + s_mean, config)
+        d_pred_geometric = L @ s_phys
+        epsilon_bias = bias_model(bias_coords)
+        d_total_pred = d_pred_geometric + epsilon_bias
+        
+        residual_seconds = d_total_pred - d_meas
+        loss_data = _compute_data_loss(residual_seconds, mask, config)
+
+        reg_loss = 0
+        if config.reg_weight > 0:
+            reg_loss += config.reg_weight * (s_norm ** 2).mean()
+        if config.bias_reg_weight > 0:
+            reg_loss += config.bias_reg_weight * (epsilon_bias ** 2).mean()
+
+        total_loss = loss_data + reg_loss
+        total_loss.backward()
+        optimizer.step()
+        scheduler.step()
+
+        loss_history.append(total_loss.item())
+
+        if step % 50 == 0:
+            pbar.set_description(f"Loss: {loss_data.item():.4f}")
+
+    return {
+        's_phys':       s_phys.detach().cpu(),
+        'epsilon_bias': epsilon_bias.detach().cpu(),
         'loss_history': loss_history,
         'model_state':  model.state_dict()
     }

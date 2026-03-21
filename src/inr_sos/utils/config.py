@@ -42,6 +42,11 @@ class ExperimentConfig:
     patience: int = 100             # stop if no val improvement for this many steps
     val_fraction: float = 0.1       # fraction of valid rays held out for validation
 
+    # --- SVD Constraint (Phase 2 Research) ---
+    use_svd_constraint: bool = False
+    svd_k: int = 220                # Number of singular values to keep
+    svd_path: str = ""              # Path to precomputed SVD .npz or .mat file
+
     def to_dict(self) -> dict:
         """Required for passing the config to wandb.init()"""
         return asdict(self)

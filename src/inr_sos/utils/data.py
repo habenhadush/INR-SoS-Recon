@@ -195,6 +195,39 @@ class USDataset(Dataset):
         self.reg_param = meta.get('reg_param', None)
         self.mask_sos = meta.get('MaskSoS', None)
 
+    def load_svd(self, svd_path=None, force_compute=False):
+        """Load or compute SVD of the L-matrix.
+        
+        Returns (U, S, Vt) as torch tensors.
+        """
+        if svd_path and Path(svd_path).exists():
+            logging.info(f"Loading precomputed SVD from {svd_path}")
+            if svd_path.endswith('.npz'):
+                data = np.load(svd_path)
+                U, S, Vt = data['U'], data['S'], data['Vt']
+            else:
+                data = load_mat(svd_path)
+                U, S, Vt = data['U'], data['S'], data['Vt']
+        else:
+            if self.L_matrix is None:
+                raise ValueError("L_matrix is not loaded. Cannot compute SVD.")
+            
+            logging.info("Computing SVD of L-matrix (this may take a few minutes)...")
+            L_np = self.L_matrix.numpy()
+            # We use the full matrix but often only valid rays are needed.
+            # For simplicity, we SVD the whole L.
+            U, S, Vt = np.linalg.svd(L_np, full_matrices=False)
+            
+            if svd_path:
+                logging.info(f"Saving computed SVD to {svd_path}")
+                np.savez(svd_path, U=U, S=S, Vt=Vt)
+
+        return (
+            torch.tensor(U, dtype=torch.float32),
+            torch.tensor(S, dtype=torch.float32),
+            torch.tensor(Vt, dtype=torch.float32)
+        )
+
     def _open_h5_file(self):
         """Helper to open HDF5 file for lazy loading."""
         if self.h5_file is None:
