@@ -162,7 +162,7 @@ def setup_logging(run_tag: str):
 def load_registry(sweep_id: str):
     with open(REGISTRY_FILE) as f:
         registry = json.load(f)
-    entry = next((e for e in registry if e["sweep_id"].startswith(sweep_id)), None)
+    entry = next((e for e in registry if e.get("sweep_id", "").startswith(sweep_id)), None)
     if entry is None:
         raise ValueError(f"Sweep {sweep_id} not found in registry.")
     return registry, entry
@@ -685,6 +685,107 @@ def make_reconstruction_grid(all_results: list,
     return fig
 
 
+# Per-sample reconstruction plots
+def save_per_sample_plots(all_results: list, out_dir: Path,
+                           run_tag: str, log) -> None:
+    """
+    Save individual per-sample reconstruction figures to disk.
+
+    Each sample gets a 2-row figure:
+      Row 0: SoS maps  — GT | method1 | method2 | ...
+      Row 1: Abs error  — info cell | error1 | error2 | ...
+
+    Saved to  out_dir/reconstructions/sample_{idx}.png
+    Orientation: transducer at top, depth downward (paper convention).
+    """
+    common_indices = set(s["idx"] for s in all_results[0]["per_sample"])
+    for r in all_results[1:]:
+        common_indices &= {s["idx"] for s in r["per_sample"]}
+    common_indices = sorted(common_indices)
+
+    recon_dir = out_dir / "reconstructions"
+    recon_dir.mkdir(parents=True, exist_ok=True)
+
+    n_methods = len(all_results)
+
+    for vis_idx in common_indices:
+        gt_entry = next(s for s in all_results[0]["per_sample"]
+                        if s["idx"] == vis_idx)
+        s_gt_np = gt_entry["s_gt_np"].flatten().astype(np.float32)
+        v_gt = np.clip(1.0 / (s_gt_np + 1e-8), 1400, 1600).reshape(64, 64)
+        bg_sos = float(np.median(v_gt))
+
+        fig, axes = plt.subplots(
+            2, 1 + n_methods,
+            figsize=(2.8 * (1 + n_methods), 5.5),
+            squeeze=False,
+        )
+        fig.suptitle(
+            f"Sample {vis_idx}  |  bg \u2248 {bg_sos:.0f} m/s",
+            fontsize=11, fontweight="bold", y=1.01,
+        )
+
+        # ── Column 0: Ground Truth ──────────────────────────────
+        ax_gt = axes[0, 0]
+        im_gt = ax_gt.imshow(v_gt, cmap="jet", vmin=1400, vmax=1600,
+                              interpolation="nearest", origin="upper")
+        ax_gt.set_title("Ground\nTruth", fontsize=9, fontweight="bold")
+        ax_gt.axis("off")
+        cb = plt.colorbar(im_gt, ax=ax_gt, fraction=0.046, pad=0.04)
+        cb.set_label("m/s", fontsize=7)
+        cb.ax.tick_params(labelsize=7)
+
+        # Info cell below GT
+        axes[1, 0].axis("off")
+        axes[1, 0].text(
+            0.5, 0.5,
+            f"idx {vis_idx}\nbg \u2248 {bg_sos:.0f} m/s",
+            ha="center", va="center", fontsize=8, color="#444444",
+            transform=axes[1, 0].transAxes,
+            bbox=dict(boxstyle="round,pad=0.4", facecolor="#f5f5f5",
+                      edgecolor="#cccccc", linewidth=0.8),
+        )
+
+        # ── Columns 1..N: each method ──────────────────────────
+        for col, result in enumerate(all_results, start=1):
+            entry = next(s for s in result["per_sample"]
+                         if s["idx"] == vis_idx)
+            s_phys = entry["s_phys_np"].flatten().astype(np.float32)
+            v_rec = np.clip(1.0 / (s_phys + 1e-8), 1400, 1600).reshape(64, 64)
+            err_map = np.abs(v_gt - v_rec)
+            mae_val = float(np.mean(err_map))
+
+            # SoS reconstruction
+            ax_sos = axes[0, col]
+            im_sos = ax_sos.imshow(v_rec, cmap="jet", vmin=1400, vmax=1600,
+                                    interpolation="nearest", origin="upper")
+            ax_sos.set_title(_short_label(result["method"]),
+                              fontsize=9, fontweight="bold")
+            ax_sos.axis("off")
+            cb2 = plt.colorbar(im_sos, ax=ax_sos, fraction=0.046, pad=0.04)
+            cb2.set_label("m/s", fontsize=7)
+            cb2.ax.tick_params(labelsize=7)
+
+            # Abs error
+            ax_err = axes[1, col]
+            im_err = ax_err.imshow(err_map, cmap="hot", vmin=0, vmax=50,
+                                    interpolation="nearest", origin="upper")
+            ax_err.set_title(f"MAE = {mae_val:.1f} m/s",
+                              fontsize=8, color="#444444", pad=3)
+            ax_err.axis("off")
+            cb3 = plt.colorbar(im_err, ax=ax_err, fraction=0.046, pad=0.04)
+            cb3.set_label("m/s", fontsize=7)
+            cb3.ax.tick_params(labelsize=7)
+
+        plt.tight_layout()
+        save_path = recon_dir / f"sample_{vis_idx}.png"
+        fig.savefig(save_path, dpi=150, bbox_inches="tight", facecolor="white")
+        plt.close(fig)
+
+    log.info(f"  Saved {len(common_indices)} per-sample reconstruction plots"
+             f" \u2192 {recon_dir}")
+
+
 # W&B summary run
 def log_summary_to_wandb(all_results, entry, indices, run_tag, sweep_id, log,
                          wb_group=None, plot_dir=None):
@@ -731,20 +832,24 @@ def log_summary_to_wandb(all_results, entry, indices, run_tag, sweep_id, log,
     log.info("  Rendering box plots ...")
     fig_bp = make_boxplots(all_results)
     wandb.log({"boxplots": _fig_to_wandb_image(fig_bp, "Metric distributions")})
-    pdf_path = out_dir / f"{run_tag}_boxplots.pdf"
-    fig_bp.savefig(pdf_path, dpi=150, bbox_inches="tight")
+    plot_path = out_dir / f"{run_tag}_boxplots.png"
+    fig_bp.savefig(plot_path, dpi=150, bbox_inches="tight")
     plt.close(fig_bp)
-    log.info(f"  Box plot PDF → {pdf_path}")
+    log.info(f"  Box plot → {plot_path}")
 
     # Reconstruction grid — 2 random samples
     log.info("  Rendering reconstruction grid ...")
     fig_grid = make_reconstruction_grid(all_results, n_visual_samples=2)
     wandb.log({"reconstruction_grid": _fig_to_wandb_image(
         fig_grid, "GT vs all methods — 2 random samples")})
-    pdf_grid = out_dir / f"{run_tag}_recon_grid.pdf"
-    fig_grid.savefig(pdf_grid, dpi=150, bbox_inches="tight")
+    grid_path = out_dir / f"{run_tag}_recon_grid.png"
+    fig_grid.savefig(grid_path, dpi=150, bbox_inches="tight")
     plt.close(fig_grid)
-    log.info(f"  Reconstruction grid PDF → {pdf_grid}")
+    log.info(f"  Reconstruction grid → {grid_path}")
+
+    # Per-sample reconstruction plots — one PDF per sample
+    log.info("  Saving per-sample reconstruction plots ...")
+    save_per_sample_plots(all_results, out_dir, run_tag, log)
 
     wandb.finish()
 
@@ -915,16 +1020,34 @@ def main():
     all_results = baseline_results + inr_results
     print_table(all_results, log)
 
-    # ── W&B summary ───────────────────────────────────────────────────────
+    # ── Plots & W&B summary ──────────────────────────────────────────────
+    out_dir = PLOT_DIR / args.sweep_id
+    out_dir.mkdir(parents=True, exist_ok=True)
+
     if not args.no_wandb:
         log_summary_to_wandb(all_results, entry, indices, run_tag,
-                             args.sweep_id, log, wb_group=wb_group)
+                             args.sweep_id, log, wb_group=wb_group,
+                             plot_dir=out_dir)
+    else:
+        # Still save plots locally even without W&B
+        log.info("\n  Saving plots locally (--no_wandb) ...")
+        fig_bp = make_boxplots(all_results)
+        fig_bp.savefig(out_dir / f"{run_tag}_boxplots.png",
+                       dpi=150, bbox_inches="tight")
+        plt.close(fig_bp)
+
+        fig_grid = make_reconstruction_grid(all_results, n_visual_samples=2)
+        fig_grid.savefig(out_dir / f"{run_tag}_recon_grid.png",
+                         dpi=150, bbox_inches="tight")
+        plt.close(fig_grid)
+
+        save_per_sample_plots(all_results, out_dir, run_tag, log)
 
     # ── Registry ──────────────────────────────────────────────────────────
     slim_results = [{k: v for k, v in r.items() if k != "per_sample"}
                     for r in all_results]
     for e in registry:
-        if e["sweep_id"].startswith(args.sweep_id):
+        if e.get("sweep_id", "").startswith(args.sweep_id):
             e["topk_comparison"] = {
                 "run_tag":     run_tag,
                 "dataset":     ds_cfg["key"],
