@@ -4,7 +4,7 @@ datasets:
   inverse_crime:
     name: "IC 8-pairs (ray approx)"
     data_file: "/DL-based-SoS/train-VS-8pairs-IC-081225.mat"
-    grid_file: "/DL-based-SoS/forward_model_lr/grid_parameters.mat"
+    grid_path: "/DL-based-SoS/forward_model_lr/grid_parameters.mat"
     has_baselines: false
     has_A_matrix: true
     notes: "10k samples, ray-approximation forward model"
@@ -29,7 +29,7 @@ datasets:
   kwave_geom:
     name: "k-Wave Geometry (32 samples)"
     data_file: "/DL-based-SoS/test_kWaveGeom_l2rec_l1rec_unifiedvar.mat"
-    grid_path: DATA_DIR + "/DL-based-SoS/forward_model_lr/grid_parameters.mat"
+    grid_path: "/DL-based-SoS/forward_model_lr/grid_parameters.mat"
     has_baselines: true
     has_A_matrix: true
     notes: "Full-wave, has embedded L1/L2/correlation, sparse A"
@@ -60,7 +60,7 @@ datasets:
   kwave_blob:
     name: "k-Wave Blob (70 samples)"
     data_file: "/DL-based-SoS/test_kWaveBlob_final.mat"
-    grid_path: DATA_DIR + "/DL-based-SoS/forward_model_lr/grid_parameters.mat"
+    grid_path: "/DL-based-SoS/forward_model_lr/grid_parameters.mat"
     has_baselines: true
     has_A_matrix: false
     matrix_file: "/DL-based-SoS/A.mat"
@@ -93,7 +93,7 @@ datasets:
   kwave_arranged:
     name: "k-Wave Arranged Measurements (train)"
     data_file: "/DL-based-SoS/arranged_allmeas_pred_train_networkoutts25.mat"
-    grid_path: DATA_DIR + "/DL-based-SoS/forward_model_lr/grid_parameters.mat"
+    grid_path: "/DL-based-SoS/forward_model_lr/grid_parameters.mat"
     has_baselines: false
     has_A_matrix: false
     matrix_file: "/DL-based-SoS/A.mat"
@@ -114,7 +114,7 @@ datasets:
   kwave_geom_unet:
     name: "k-Wave Geometry — U-Net Denoised"
     data_file: "/DL-based-SoS/PLACEHOLDER_geom_unet.mat"
-    grid_path: DATA_DIR + "/DL-based-SoS/forward_model_lr/grid_parameters.mat"
+    grid_path: "/DL-based-SoS/forward_model_lr/grid_parameters.mat"
     has_baselines: false
     has_A_matrix: true
     pix2time: 4.966887417218542e-08
@@ -146,7 +146,7 @@ datasets:
   kwave_geom_diffusion:
     name: "k-Wave Geometry — Diffusion Denoised"
     data_file: "/DL-based-SoS/PLACEHOLDER_geom_diffusion.mat"
-    grid_path: DATA_DIR + "/DL-based-SoS/forward_model_lr/grid_parameters.mat"
+    grid_path: "/DL-based-SoS/forward_model_lr/grid_parameters.mat"
     has_baselines: false
     has_A_matrix: true
     pix2time: 4.966887417218542e-08
@@ -178,7 +178,7 @@ datasets:
   kwave_blob_unet:
     name: "k-Wave Blob — U-Net Denoised"
     data_file: "/DL-based-SoS/PLACEHOLDER_blob_unet.mat"
-    grid_path: DATA_DIR + "/DL-based-SoS/forward_model_lr/grid_parameters.mat"
+    grid_path: "/DL-based-SoS/forward_model_lr/grid_parameters.mat"
     has_baselines: false
     has_A_matrix: false
     matrix_file: "/DL-based-SoS/A.mat"
@@ -211,7 +211,7 @@ datasets:
   kwave_blob_diffusion:
     name: "k-Wave Blob — Diffusion Denoised"
     data_file: "/DL-based-SoS/PLACEHOLDER_blob_diffusion.mat"
-    grid_path: DATA_DIR + "/DL-based-SoS/forward_model_lr/grid_parameters.mat"
+    grid_path: "/DL-based-SoS/forward_model_lr/grid_parameters.mat"
     has_baselines: false
     has_A_matrix: false
     matrix_file: "/DL-based-SoS/A.mat"
