@@ -1,0 +1,37 @@
+# Research Plan: Addressing Forward Model Mismatch in INR-based SoS Reconstruction
+
+## 1. The Core Challenge: Model Bias & Ill-Conditioning
+Through spectral and SVD analysis of k-Wave simulation data, we have identified two fundamental obstacles:
+*   **Systematic Model Bias:** The mismatch $\epsilon = d_{meas} - L \cdot s_{gt}$ is not random noise. It is ~85% low-frequency and occupies the same frequency band as the structural signal. This makes it inseparable via standard denoising or early stopping.
+*   **Extreme Ill-Conditioning:** The straight-ray $L$-matrix has a condition number of $10^{13}$. This means tiny measurement errors (like the 0.1% energy mismatch in k-Wave) are amplified by 13 orders of magnitude during reconstruction, creating catastrophic artifacts.
+
+---
+
+## 2. Hypothesis Testing Roadmap
+
+### Phase 1: The Bias-Absorber (Dual-Band INR) [FAILED/LIMITED]
+*   **Strategy:** Simultaneous optimization of two INRs: $INR_{Anatomy}$ (high-bandwidth) and $INR_{Bias}$ (low-bandwidth).
+*   **Mathematical Grounding:** Guan et al. (2024), "Untrained Forward Residuals."
+*   **Outcome:** Hit the **"Shortcut Learning"** trap. Gradient descent favored the additive Bias INR over the ill-conditioned geometric operator $L$. The Bias network "stole" the signal, leaving the anatomy reconstruction flat or distorted.
+*   **Lesson:** Additive correction cannot fix geometric path errors (refraction).
+
+### Phase 2: The Subspace-Constraint (SVD-INR) [NEXT]
+*   **Strategy:** Restrict the INR's output to the stable subspace of the $L$-matrix.
+*   **Logic:** Since 99% of signal energy is captured by the top ~220 singular values, we project the INR's slowness field $s$ onto the right-singular vectors $V_i$ for $i < K$.
+*   **Objective:** Prevent the INR from generating SoS patterns that fall into the "amplification trap." This forces the network to find the most "physically stable" solution.
+*   **Key Metrics:** RMSE in the projected subspace vs. full-space.
+
+### Phase 3: Self-Supervised Ray Pruning (Weighted Ray-Batching)
+*   **Strategy:** Dynamic down-weighting of "bent" rays during optimization.
+*   **Logic:** Use **Correlation Vectors** and **Instantaneous Residuals** $|Ls - d_{meas}|$ to identify rays where the straight-line assumption is most violated.
+*   **Mathematical Grounding:** Byra et al. (2024), "Confidence-weighted SoS Estimation."
+*   **Objective:** Filter the data to make it compatible with the "lie" of the $L$-matrix.
+
+### Phase 4: Differentiable Path Correction (The Gold Standard)
+*   **Strategy:** Move from a static $L$ to a dynamic $L(s)$.
+*   **Logic:** Use the gradient of the continuous INR $\nabla s$ to compute path perturbations (bending) based on Fermat’s Principle.
+*   **Mathematical Grounding:** Wang et al. (2025), "P2INR-FWI."
+*   **Objective:** Directly model the refraction/diffraction physics that causes the systematic bias.
+
+---
+
