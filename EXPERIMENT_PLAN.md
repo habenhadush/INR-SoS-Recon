@@ -58,7 +58,7 @@
 
 **Branch**: `experiment/kaipio-somersalo`
 **Priority**: Tier 1 — implement first
-**Status**: [ ] NOT STARTED
+**Status**: [x] COMPLETE (2026-03-24)
 
 ### Hypothesis
 
@@ -75,10 +75,10 @@ Statistically characterizing the model error (mean + covariance) and incorporati
 
 ### Sub-experiments
 
-- [ ] **1a**: Template subtraction only (d_corrected = d − μ_ε), then standard L1/L2 solve
-- [ ] **1b**: Template + covariance weighting (full Kaipio-Somersalo)
-- [ ] **1c**: Template + covariance + INR reconstruction (combine with existing INR pipeline)
-- [ ] **1d**: Vary number of PCA components K_ε ∈ {5, 10, 15, 20, 31}
+- [x] **1a**: Template subtraction only (d_corrected = d − μ_ε), then standard L1/L2 solve
+- [x] **1b**: Template + covariance weighting (full Kaipio-Somersalo)
+- [x] **1c**: Template + covariance + INR reconstruction (combine with existing INR pipeline)
+- [x] **1d**: Vary number of PCA components K_ε ∈ {5, 10, 15, 20, 31}
 
 ### Success criteria
 
@@ -90,19 +90,24 @@ Statistically characterizing the model error (mean + covariance) and incorporati
 
 | Sub-exp | CNR | SSIM | RMSE | MAE | Notes |
 |---------|-----|------|------|-----|-------|
-| 1a | — | — | — | — | |
-| 1b | — | — | — | — | |
-| 1c | — | — | — | — | |
-| 1d | — | — | — | — | |
+| 1a | 0.28 | 0.60 | 287 | 281 | Template correction negligible; LSQR catastrophic |
+| 1b | 0.27 | 0.65 | 288 | 283 | Covariance weighting no help; 31-sample Γ too low-rank |
+| 1c | **1.22** | **0.83** | 9.0 | **3.49** | KS-INR marginal over raw INR (3.58); INR does the work |
+| 1d | 0.28 | 0.65 | 288 | 283 | K sweep (5-31): no effect on linear solver |
 
 ### Results — kwave_blob
 
 | Sub-exp | CNR | SSIM | RMSE | MAE | Notes |
 |---------|-----|------|------|-----|-------|
-| 1a | — | — | — | — | |
-| 1b | — | — | — | — | |
-| 1c | — | — | — | — | |
-| 1d | — | — | — | — | |
+| 1c | **0.49** | **0.77** | 10.5 | **5.09** | KS-INR marginal over raw INR (5.14) |
+
+### Key Findings
+
+1. **Linear solvers (LSQR) are catastrophic** (MAE ~280) regardless of KS correction — L-matrix ill-conditioning dominates.
+2. **KS mean correction is negligible** — mismatch energy (0.11%) too small relative to regularization-induced error.
+3. **KS covariance weighting fails** — 31-sample covariance too low-rank.
+4. **INR provides the real regularization** — spectral bias acts as implicit prior, making explicit mismatch correction redundant.
+5. **Conclusion**: Measurement-domain correction alone is insufficient. Need to control the *inversion amplification* (→ Experiment 2).
 
 ---
 
@@ -110,7 +115,7 @@ Statistically characterizing the model error (mean + covariance) and incorporati
 
 **Branch**: `experiment/svd-constrained-inr`
 **Priority**: Tier 1 — implement alongside Exp 1
-**Status**: [ ] NOT STARTED
+**Status**: [~] IN PROGRESS (2026-03-24)
 
 ### Hypothesis
 
@@ -449,3 +454,5 @@ Each experiment branch starts fresh from `k-wave-validation`. Results are record
 | Date | Experiment | Change | Result |
 |------|-----------|--------|--------|
 | 2026-03-23 | — | Plan created | — |
+| 2026-03-24 | Exp 1 (KS) | All sub-experiments complete | KS negligible; INR does the heavy lifting (MAE 3.49 vs 3.58) |
+| 2026-03-24 | Exp 2 (SVD) | Implementation started | Script: `scripts/run_svd_constrained.py` |
