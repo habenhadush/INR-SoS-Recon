@@ -297,7 +297,11 @@ def run_2a_tsvd(dataset, dataset_name, U, S, Vt,
     logger.info("=" * 60)
 
     n_samples = len(dataset)
+    plot_indices = set(_get_plot_indices(n_samples))
     results = {}
+    # Store reconstructions per sample for cross-K comparison plots
+    per_sample_recons = {idx: {} for idx in plot_indices}
+    per_sample_gt = {}
 
     for K in k_values:
         logger.info(f"\n--- K = {K} ---")
@@ -314,7 +318,6 @@ def run_2a_tsvd(dataset, dataset_name, U, S, Vt,
             s_gt = sample['s_gt_raw'].numpy().flatten()
             d_meas = sample['d_meas'].numpy().flatten()
             mask = sample['mask'].numpy().flatten()
-            valid = mask > 0.5
 
             # Project data into SVD space: alpha = diag(1/sigma_k) @ U_K^T @ d
             d_valid = d_meas * mask
@@ -326,6 +329,10 @@ def run_2a_tsvd(dataset, dataset_name, U, S, Vt,
             metrics = calculate_metrics(s_tsvd, s_gt, grid_shape=(64, 64))
             results[k_label].append(metrics)
 
+            if test_idx in plot_indices:
+                per_sample_recons[test_idx][f"TSVD K={K}"] = s_tsvd
+                per_sample_gt[test_idx] = s_gt
+
             if test_idx % 10 == 0:
                 logger.info(
                     f"  Sample {test_idx}: MAE={metrics['MAE']:.2f}, "
@@ -336,6 +343,17 @@ def run_2a_tsvd(dataset, dataset_name, U, S, Vt,
         mae_mean = np.mean([m['MAE'] for m in results[k_label]])
         cnr_mean = np.mean([m['CNR'] for m in results[k_label]])
         logger.info(f"  K={K}: mean MAE={mae_mean:.2f}, mean CNR={cnr_mean:.3f}")
+
+    # Plot representative samples with a selection of K values
+    plot_k_selection = [k for k in k_values if k in [86, 200, 500, 2000, 4096]]
+    if not plot_k_selection:
+        plot_k_selection = k_values[:min(5, len(k_values))]
+    for idx in plot_indices:
+        methods_to_plot = {k: v for k, v in per_sample_recons[idx].items()
+                          if any(f"K={pk}" in k for pk in [str(x) for x in plot_k_selection])}
+        if methods_to_plot:
+            plot_sample_comparison(idx, per_sample_gt[idx], methods_to_plot,
+                                   dataset_name, "2a")
 
     _print_results_table("2a", results, dataset_name)
     plot_k_sweep(results, dataset_name, "2a")
@@ -359,7 +377,10 @@ def run_2b_lsqr_early_stop(dataset, dataset_name,
 
     L_np = dataset.L_matrix.numpy()
     n_samples = len(dataset)
+    plot_indices = set(_get_plot_indices(n_samples))
     results = {}
+    per_sample_recons = {idx: {} for idx in plot_indices}
+    per_sample_gt = {}
 
     for n_iter in iter_values:
         logger.info(f"\n--- LSQR iter_lim = {n_iter} ---")
@@ -381,6 +402,10 @@ def run_2b_lsqr_early_stop(dataset, dataset_name,
             metrics = calculate_metrics(s_rec, s_gt, grid_shape=(64, 64))
             results[k_label].append(metrics)
 
+            if test_idx in plot_indices:
+                per_sample_recons[test_idx][f"LSQR i={n_iter}"] = s_rec
+                per_sample_gt[test_idx] = s_gt
+
             if test_idx % 10 == 0:
                 logger.info(
                     f"  Sample {test_idx}: MAE={metrics['MAE']:.2f}, "
@@ -390,6 +415,17 @@ def run_2b_lsqr_early_stop(dataset, dataset_name,
         mae_mean = np.mean([m['MAE'] for m in results[k_label]])
         cnr_mean = np.mean([m['CNR'] for m in results[k_label]])
         logger.info(f"  iter={n_iter}: mean MAE={mae_mean:.2f}, mean CNR={cnr_mean:.3f}")
+
+    # Plot representative samples with a selection of iteration counts
+    plot_iter_selection = [n for n in iter_values if n in [25, 100, 500, 1000]]
+    if not plot_iter_selection:
+        plot_iter_selection = iter_values[:min(4, len(iter_values))]
+    for idx in plot_indices:
+        methods_to_plot = {k: v for k, v in per_sample_recons[idx].items()
+                          if any(f"i={pi}" in k for pi in [str(x) for x in plot_iter_selection])}
+        if methods_to_plot:
+            plot_sample_comparison(idx, per_sample_gt[idx], methods_to_plot,
+                                   dataset_name, "2b")
 
     _print_results_table("2b", results, dataset_name)
     plot_metrics_summary(results, dataset_name, "2b")
@@ -750,10 +786,13 @@ def run_2c_inr_hard_projection(dataset, dataset_name, U, S, Vt,
 
     n_samples = len(dataset)
     eval_indices = list(range(min(n_eval_samples, n_samples)))
+    plot_indices = set(_get_plot_indices(len(eval_indices)))
     config = _make_inr_config()
     results = {}
+    # Store reconstructions for cross-K plots: {sample_idx: {method_name: s_rec}}
+    per_sample_recons = {eval_indices[i]: {} for i in plot_indices}
+    per_sample_gt = {}
 
-    # Also run unconstrained INR (K=full, no projection) as baseline
     for K in k_values:
         logger.info(f"\n--- K = {K} ---")
         k_label = f"K={K}"
@@ -786,6 +825,10 @@ def run_2c_inr_hard_projection(dataset, dataset_name, U, S, Vt,
             metrics = calculate_metrics(s_rec, s_gt_np, grid_shape=(64, 64))
             results[k_label].append(metrics)
 
+            if i in plot_indices:
+                per_sample_recons[test_idx][f"INR K={K}"] = s_rec
+                per_sample_gt[test_idx] = s_gt_np
+
             logger.info(
                 f"  Sample {test_idx}: MAE={metrics['MAE']:.2f}, "
                 f"CNR={metrics['CNR']:.3f}, SSIM={metrics['SSIM']:.4f}"
@@ -794,6 +837,17 @@ def run_2c_inr_hard_projection(dataset, dataset_name, U, S, Vt,
         mae_mean = np.mean([m['MAE'] for m in results[k_label]])
         cnr_mean = np.mean([m['CNR'] for m in results[k_label]])
         logger.info(f"  K={K}: mean MAE={mae_mean:.2f}, mean CNR={cnr_mean:.3f}")
+
+    # Plot representative samples with a selection of K values
+    plot_k_selection = [k for k in k_values if k in [86, 200, 500, 2000, 4096]]
+    if not plot_k_selection:
+        plot_k_selection = k_values[:min(5, len(k_values))]
+    for idx in per_sample_recons:
+        methods_to_plot = {k: v for k, v in per_sample_recons[idx].items()
+                          if any(f"K={pk}" in k for pk in [str(x) for x in plot_k_selection])}
+        if methods_to_plot:
+            plot_sample_comparison(idx, per_sample_gt[idx], methods_to_plot,
+                                   dataset_name, "2c")
 
     _print_results_table("2c", results, dataset_name)
     plot_k_sweep(results, dataset_name, "2c")
@@ -824,6 +878,10 @@ def run_2d_progressive_k(dataset, dataset_name, U, S, Vt,
     }
 
     results = {}
+    plot_indices = set(_get_plot_indices(len(eval_indices)))
+    per_sample_recons = {eval_indices[i]: {} for i in plot_indices}
+    per_sample_gt = {}
+
     for sched_name, schedule in schedules.items():
         logger.info(f"\n--- Schedule: {sched_name} ---")
         results[sched_name] = []
@@ -847,10 +905,20 @@ def run_2d_progressive_k(dataset, dataset_name, U, S, Vt,
             metrics = calculate_metrics(s_rec, s_gt_np, grid_shape=(64, 64))
             results[sched_name].append(metrics)
 
+            if i in plot_indices:
+                per_sample_recons[test_idx][f"Prog {sched_name}"] = s_rec
+                per_sample_gt[test_idx] = s_gt_np
+
             logger.info(
                 f"  Sample {test_idx}: MAE={metrics['MAE']:.2f}, "
                 f"CNR={metrics['CNR']:.3f}"
             )
+
+    # Plot representative samples comparing all schedules
+    for idx in per_sample_recons:
+        if per_sample_recons[idx]:
+            plot_sample_comparison(idx, per_sample_gt[idx], per_sample_recons[idx],
+                                   dataset_name, "2d")
 
     _print_results_table("2d", results, dataset_name)
     plot_metrics_summary(results, dataset_name, "2d")
@@ -882,6 +950,10 @@ def run_2e_soft_projection(dataset, dataset_name, U, S, Vt,
     }
 
     results = {}
+    plot_indices = set(_get_plot_indices(len(eval_indices)))
+    per_sample_recons = {eval_indices[i]: {} for i in plot_indices}
+    per_sample_gt = {}
+
     for name, (K_center, taper_width) in taper_configs.items():
         logger.info(f"\n--- {name} ---")
         results[name] = []
@@ -906,10 +978,20 @@ def run_2e_soft_projection(dataset, dataset_name, U, S, Vt,
             metrics = calculate_metrics(s_rec, s_gt_np, grid_shape=(64, 64))
             results[name].append(metrics)
 
+            if i in plot_indices:
+                per_sample_recons[test_idx][name] = s_rec
+                per_sample_gt[test_idx] = s_gt_np
+
             logger.info(
                 f"  Sample {test_idx}: MAE={metrics['MAE']:.2f}, "
                 f"CNR={metrics['CNR']:.3f}"
             )
+
+    # Plot representative samples comparing all taper configs
+    for idx in per_sample_recons:
+        if per_sample_recons[idx]:
+            plot_sample_comparison(idx, per_sample_gt[idx], per_sample_recons[idx],
+                                   dataset_name, "2e")
 
     _print_results_table("2e", results, dataset_name)
     plot_metrics_summary(results, dataset_name, "2e")
