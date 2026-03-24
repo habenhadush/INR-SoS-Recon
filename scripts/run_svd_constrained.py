@@ -70,6 +70,25 @@ SOS_MIN = 1380.0
 SOS_MAX = 1620.0
 
 
+def _compute_svd_background(L_matrix):
+    """Precompute background slowness and its forward projection.
+
+    Fixes the DC component bug: SVD projection V_K @ V_K^T removes parts
+    of the constant background outside span(V_K). By subtracting background
+    before projection, only the perturbation is truncated.
+
+    Returns:
+        s_bg: scalar background slowness (1/SOS_BG)
+        d_bg: (M, 1) background measurements L @ s_bg_vec
+    """
+    s_bg = 1.0 / SOS_BG
+    N = L_matrix.shape[1]
+    s_bg_vec = np.full((N, 1), s_bg, dtype=np.float32)
+    L_np = L_matrix.numpy() if isinstance(L_matrix, torch.Tensor) else np.asarray(L_matrix)
+    d_bg = (L_np @ s_bg_vec).astype(np.float32)  # (M, 1)
+    return s_bg, d_bg
+
+
 # =============================================================================
 #  Dataset loading (shared with Exp 1)
 # =============================================================================
@@ -303,6 +322,10 @@ def run_2a_tsvd(dataset, dataset_name, U, S, Vt,
     per_sample_recons = {idx: {} for idx in plot_indices}
     per_sample_gt = {}
 
+    # Precompute background for DC fix
+    s_bg, d_bg = _compute_svd_background(dataset.L_matrix)
+    d_bg_flat = d_bg.flatten()
+
     for K in k_values:
         logger.info(f"\n--- K = {K} ---")
         k_label = f"K={K}"
@@ -319,12 +342,12 @@ def run_2a_tsvd(dataset, dataset_name, U, S, Vt,
             d_meas = sample['d_meas'].numpy().flatten()
             mask = sample['mask'].numpy().flatten()
 
-            # Project data into SVD space: alpha = diag(1/sigma_k) @ U_K^T @ d
-            d_valid = d_meas * mask
-            alpha = (U_K.T @ d_valid) / (S_K + 1e-15)  # (K,)
+            # Subtract background, mask, then invert in SVD space (DC fix)
+            d_delta = (d_meas - d_bg_flat) * mask
+            alpha = (U_K.T @ d_delta) / (S_K + 1e-15)  # (K,)
 
-            # Reconstruct: s = V_K @ alpha
-            s_tsvd = V_K @ alpha  # (4096,)
+            # Reconstruct: s = s_bg + V_K @ alpha (background preserved)
+            s_tsvd = s_bg + V_K @ alpha  # (4096,)
 
             metrics = calculate_metrics(s_tsvd, s_gt, grid_shape=(64, 64))
             results[k_label].append(metrics)
@@ -437,19 +460,23 @@ def run_2b_lsqr_early_stop(dataset, dataset_name,
 # =============================================================================
 
 def optimize_svd_constrained(sample, L_matrix, model, config,
-                              U_K, S_K, V_K, label="SVD-INR"):
+                              U_K, S_K, V_K, d_bg, s_bg, label="SVD-INR"):
     """INR training with hard SVD subspace projection.
 
-    Instead of d_pred = L @ s, we use the reduced forward model:
+    Projects only the perturbation δs = s - s_bg through the SVD subspace,
+    preserving the DC background component:
         s_raw  = INR(coords) * s_std + s_mean
-        alpha  = V_K^T @ s_raw          (K,)
-        d_pred = (U_K * S_K) @ alpha    (M,)   [reduced, well-conditioned]
-        s_proj = V_K @ alpha            for final reconstruction
+        δs     = s_raw - s_bg
+        alpha  = V_K^T @ δs             (K,)
+        d_pred = d_bg + (U_K * S_K) @ alpha   (M,)
+        s_proj = s_bg + V_K @ alpha      for final reconstruction
 
     Args:
         U_K: (M, K) left singular vectors (torch, on device)
         S_K: (K,) singular values (torch, on device)
         V_K: (4096, K) right singular vectors (torch, on device)
+        d_bg: (M, 1) background measurements L @ s_bg_vec (numpy)
+        s_bg: scalar background slowness (1/SOS_BG)
     """
     model = model.to(_DEVICE)
     coords = sample['coords'].to(_DEVICE)
@@ -457,6 +484,10 @@ def optimize_svd_constrained(sample, L_matrix, model, config,
     mask = sample['mask'].to(_DEVICE)
     s_mean = sample['s_stats'][0].item()
     s_std = sample['s_stats'][1].item()
+
+    # Background tensors on device (DC fix)
+    d_bg_t = torch.tensor(d_bg, dtype=torch.float32, device=_DEVICE) if not isinstance(d_bg, torch.Tensor) else d_bg.to(_DEVICE)
+    s_bg_t = torch.tensor(s_bg, dtype=torch.float32, device=_DEVICE)
 
     # Precompute U_K_scaled = U_K * S_K for fast forward model
     U_K_scaled = U_K * S_K.unsqueeze(0)  # (M, K)
@@ -477,11 +508,12 @@ def optimize_svd_constrained(sample, L_matrix, model, config,
         s_norm = model(coords)  # (4096, 1)
         s_phys = _maybe_clamp_slowness(s_norm * s_std + s_mean, config)
 
-        # SVD projection: project slowness into K-dim subspace
-        alpha = V_K.T @ s_phys  # (K, 1)
+        # SVD projection on perturbation only (DC fix)
+        delta_s = s_phys - s_bg_t
+        alpha = V_K.T @ delta_s  # (K, 1)
 
-        # Reduced forward model
-        d_pred = U_K_scaled @ alpha  # (M, 1)
+        # Reduced forward model with background preserved
+        d_pred = d_bg_t + U_K_scaled @ alpha  # (M, 1)
 
         residual_seconds = d_pred - d_meas
         loss = _compute_data_loss(residual_seconds, train_mask, config)
@@ -491,7 +523,7 @@ def optimize_svd_constrained(sample, L_matrix, model, config,
         if config.reg_weight > 0:
             reg_loss += config.reg_weight * (s_norm ** 2).mean()
         if config.tv_weight > 0:
-            s_proj = V_K @ alpha  # (4096, 1)
+            s_proj = s_bg_t + V_K @ alpha  # (4096, 1)
             s_img = s_proj.reshape(64, 64)
             tv_x = ((s_img[:, 1:] - s_img[:, :-1]) ** 2).mean()
             tv_z = ((s_img[1:, :] - s_img[:-1, :]) ** 2).mean()
@@ -519,13 +551,14 @@ def optimize_svd_constrained(sample, L_matrix, model, config,
 
     stopper.restore_best(model)
 
-    # Final reconstruction: project to subspace
+    # Final reconstruction: project perturbation to subspace, add background
     model.eval()
     with torch.no_grad():
         s_norm = model(coords)
         s_phys = _maybe_clamp_slowness(s_norm * s_std + s_mean, config)
-        alpha = V_K.T @ s_phys
-        s_proj = V_K @ alpha  # (4096, 1) — lives in span(V_K)
+        delta_s = s_phys - s_bg_t
+        alpha = V_K.T @ delta_s
+        s_proj = s_bg_t + V_K @ alpha  # (4096, 1) — perturbation in span(V_K) + background
 
     return {
         's_phys': s_proj.detach().cpu(),
@@ -536,9 +569,11 @@ def optimize_svd_constrained(sample, L_matrix, model, config,
 
 
 def optimize_svd_progressive(sample, L_matrix, model, config,
-                               U, S, Vt, k_schedule, label="Prog-SVD-INR"):
+                               U, S, Vt, k_schedule, d_bg, s_bg,
+                               label="Prog-SVD-INR"):
     """INR training with progressive K (coarse-to-fine).
 
+    Projects only the perturbation δs = s - s_bg through the SVD subspace.
     k_schedule: list of (step_threshold, K) tuples, e.g.:
         [(0, 50), (200, 100), (400, 200), (600, 400)]
     K increases at specified steps.
@@ -549,6 +584,10 @@ def optimize_svd_progressive(sample, L_matrix, model, config,
     mask = sample['mask'].to(_DEVICE)
     s_mean = sample['s_stats'][0].item()
     s_std = sample['s_stats'][1].item()
+
+    # Background tensors on device (DC fix)
+    d_bg_t = torch.tensor(d_bg, dtype=torch.float32, device=_DEVICE) if not isinstance(d_bg, torch.Tensor) else d_bg.to(_DEVICE)
+    s_bg_t = torch.tensor(s_bg, dtype=torch.float32, device=_DEVICE)
 
     # Convert SVD to torch tensors on device
     U_full = torch.tensor(U, dtype=torch.float32, device=_DEVICE)
@@ -585,9 +624,10 @@ def optimize_svd_progressive(sample, L_matrix, model, config,
         s_norm = model(coords)
         s_phys = _maybe_clamp_slowness(s_norm * s_std + s_mean, config)
 
-        alpha = V_K.T @ s_phys
+        delta_s = s_phys - s_bg_t
+        alpha = V_K.T @ delta_s
         U_K_scaled = U_K * S_K.unsqueeze(0)
-        d_pred = U_K_scaled @ alpha
+        d_pred = d_bg_t + U_K_scaled @ alpha
 
         residual_seconds = d_pred - d_meas
         loss = _compute_data_loss(residual_seconds, train_mask, config)
@@ -596,7 +636,7 @@ def optimize_svd_progressive(sample, L_matrix, model, config,
         if config.reg_weight > 0:
             reg_loss += config.reg_weight * (s_norm ** 2).mean()
         if config.tv_weight > 0:
-            s_proj = V_K @ alpha
+            s_proj = s_bg_t + V_K @ alpha
             s_img = s_proj.reshape(64, 64)
             tv_x = ((s_img[:, 1:] - s_img[:, :-1]) ** 2).mean()
             tv_z = ((s_img[1:, :] - s_img[:-1, :]) ** 2).mean()
@@ -630,8 +670,9 @@ def optimize_svd_progressive(sample, L_matrix, model, config,
     with torch.no_grad():
         s_norm = model(coords)
         s_phys = _maybe_clamp_slowness(s_norm * s_std + s_mean, config)
-        alpha = V_K_final.T @ s_phys
-        s_proj = V_K_final @ alpha
+        delta_s = s_phys - s_bg_t
+        alpha = V_K_final.T @ delta_s
+        s_proj = s_bg_t + V_K_final @ alpha
 
     return {
         's_phys': s_proj.detach().cpu(),
@@ -643,9 +684,10 @@ def optimize_svd_progressive(sample, L_matrix, model, config,
 
 def optimize_svd_soft(sample, L_matrix, model, config,
                        U, S, Vt, K_center, taper_width,
-                       label="Soft-SVD-INR"):
+                       d_bg, s_bg, label="Soft-SVD-INR"):
     """INR training with soft SVD taper (Gaussian rolloff beyond K_center).
 
+    Projects only the perturbation δs = s - s_bg through the tapered SVD.
     Weight for mode i: w_i = exp(-max(0, i - K_center)^2 / (2 * taper_width^2))
     Modes below K_center have weight 1, modes above are smoothly suppressed.
     """
@@ -655,6 +697,10 @@ def optimize_svd_soft(sample, L_matrix, model, config,
     mask = sample['mask'].to(_DEVICE)
     s_mean = sample['s_stats'][0].item()
     s_std = sample['s_stats'][1].item()
+
+    # Background tensors on device (DC fix)
+    d_bg_t = torch.tensor(d_bg, dtype=torch.float32, device=_DEVICE) if not isinstance(d_bg, torch.Tensor) else d_bg.to(_DEVICE)
+    s_bg_t = torch.tensor(s_bg, dtype=torch.float32, device=_DEVICE)
 
     N = len(S)  # 4096
     U_t = torch.tensor(U, dtype=torch.float32, device=_DEVICE)
@@ -685,9 +731,10 @@ def optimize_svd_soft(sample, L_matrix, model, config,
         s_norm = model(coords)
         s_phys = _maybe_clamp_slowness(s_norm * s_std + s_mean, config)
 
-        # Tapered forward: project s into SVD space, apply taper, back to measurement
-        alpha = V.T @ s_phys  # (4096, 1)
-        d_pred = U_scaled @ alpha  # (M, 1)
+        # Tapered forward on perturbation (DC fix)
+        delta_s = s_phys - s_bg_t
+        alpha = V.T @ delta_s  # (4096, 1)
+        d_pred = d_bg_t + U_scaled @ alpha  # (M, 1)
 
         residual_seconds = d_pred - d_meas
         loss = _compute_data_loss(residual_seconds, train_mask, config)
@@ -696,7 +743,7 @@ def optimize_svd_soft(sample, L_matrix, model, config,
         if config.reg_weight > 0:
             reg_loss += config.reg_weight * (s_norm ** 2).mean()
         if config.tv_weight > 0:
-            s_proj = V @ (taper.unsqueeze(1) * alpha)
+            s_proj = s_bg_t + V @ (taper.unsqueeze(1) * alpha)
             s_img = s_proj.reshape(64, 64)
             tv_x = ((s_img[:, 1:] - s_img[:, :-1]) ** 2).mean()
             tv_z = ((s_img[1:, :] - s_img[:-1, :]) ** 2).mean()
@@ -727,8 +774,9 @@ def optimize_svd_soft(sample, L_matrix, model, config,
     with torch.no_grad():
         s_norm = model(coords)
         s_phys = _maybe_clamp_slowness(s_norm * s_std + s_mean, config)
-        alpha = V.T @ s_phys
-        s_proj = V @ (taper.unsqueeze(1) * alpha)
+        delta_s = s_phys - s_bg_t
+        alpha = V.T @ delta_s
+        s_proj = s_bg_t + V @ (taper.unsqueeze(1) * alpha)
 
     return {
         's_phys': s_proj.detach().cpu(),
@@ -789,6 +837,10 @@ def run_2c_inr_hard_projection(dataset, dataset_name, U, S, Vt,
     plot_indices = set(_get_plot_indices(len(eval_indices)))
     config = _make_inr_config()
     results = {}
+
+    # Precompute background for DC fix
+    s_bg, d_bg = _compute_svd_background(dataset.L_matrix)
+
     # Store reconstructions for cross-K plots: {sample_idx: {method_name: s_rec}}
     per_sample_recons = {eval_indices[i]: {} for i in plot_indices}
     per_sample_gt = {}
@@ -814,6 +866,7 @@ def run_2c_inr_hard_projection(dataset, dataset_name, U, S, Vt,
                 model=model,
                 config=config,
                 U_K=U_K, S_K=S_K, V_K=V_K,
+                d_bg=d_bg, s_bg=s_bg,
                 label=f"K={K}",
             )
 
@@ -870,6 +923,9 @@ def run_2d_progressive_k(dataset, dataset_name, U, S, Vt,
     eval_indices = list(range(min(n_eval_samples, n_samples)))
     config = _make_inr_config()
 
+    # Precompute background for DC fix
+    s_bg, d_bg = _compute_svd_background(dataset.L_matrix)
+
     # Define progressive schedules to compare
     schedules = {
         "50→200": [(0, 50), (125, 100), (250, 150), (375, 200)],
@@ -898,6 +954,7 @@ def run_2d_progressive_k(dataset, dataset_name, U, S, Vt,
                 config=config,
                 U=U, S=S, Vt=Vt,
                 k_schedule=schedule,
+                d_bg=d_bg, s_bg=s_bg,
                 label=sched_name,
             )
 
@@ -940,6 +997,9 @@ def run_2e_soft_projection(dataset, dataset_name, U, S, Vt,
     eval_indices = list(range(min(n_eval_samples, n_samples)))
     config = _make_inr_config()
 
+    # Precompute background for DC fix
+    s_bg, d_bg = _compute_svd_background(dataset.L_matrix)
+
     # Sweep configurations: (K_center, taper_width)
     taper_configs = {
         "K=200,τ=50":  (200, 50),
@@ -971,6 +1031,7 @@ def run_2e_soft_projection(dataset, dataset_name, U, S, Vt,
                 U=U, S=S, Vt=Vt,
                 K_center=K_center,
                 taper_width=taper_width,
+                d_bg=d_bg, s_bg=s_bg,
                 label=name,
             )
 
