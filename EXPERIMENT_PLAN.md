@@ -256,52 +256,71 @@ s = V_K @ α                                     (subspace projected)
 
 **Branch**: `experiment/eikonal-bent-ray`
 **Priority**: Tier 2 — after Tier 1 results
-**Status**: [ ] NOT STARTED
+**Status**: [x] COMPLETE — FAILED (fundamental mismatch between ray-traced and beamformed L)
 
 ### Hypothesis
 
 Recomputing the L-matrix using bent-ray paths (via Fast Marching eikonal solver) corrects the physics directly, reducing the mismatch at its source rather than mitigating it statistically.
 
-### Method
+### Method (as implemented)
 
-1. Install scikit-fmm (or implement fast sweeping)
-2. After every N epochs of INR training:
-   - Extract SoS map: c = 1/INR(coords), reshape to 64×64
-   - For each source (8 total): solve |∇T|² = 1/c² via FMM
-   - Backtrace rays from receivers along −∇T
-   - Rebuild L_bent as sparse matrix
-3. Continue INR training with L_bent
+Sub-experiments were restructured during implementation to diagnose the failure incrementally:
 
-### Sub-experiments
+- **5a**: Baseline — train INR with original (real) L-matrix (control)
+- **5b**: Straight-ray Siddon L, per-row normalized to match real L row norms
+- **5c**: Eikonal bent-ray L (scikit-fmm + gradient backtrace), per-row normalized
+- **5d (planned)**: Gaussian-broadened Siddon L + per-row normalized — abandoned after broadening analysis showed correlation ceiling of 0.097
 
-- [ ] **5a**: Single L-update after straight-ray INR converges
-- [ ] **5b**: Iterative L-update every N=100 epochs
-- [ ] **5c**: Iterative L-update every N=50 epochs
-- [ ] **5d**: Combine with best Tier 1 approach (KS + SVD + bent-ray)
+### Geometry Exploration (Phase 0)
 
-### Success criteria
+Comprehensive notebook analysis (`notebooks/experiment5_geometry_exploration.ipynb`) identified:
+- DT pixel indexing convention: `row_idx = ix * 128 + iz`
+- 8 element pairs with δ_channel=17: (27,44), (37,54), (45,62), (54,71), (55,72), (63,80), (71,88), (80,97)
+- Sign convention: L = ray(right_elem → pixel) - ray(left_elem → pixel)
+- Grid: SoS 64×64 (0.6mm), DT 128×128 (0.3mm), elements at z=0
 
-- CNR and SSIM improve over Tier 1 (bent rays should sharpen inclusion boundaries)
-- Verify that L-update cost is negligible (<1% of total training time)
-- kwave_blob is the real test — higher contrast (62.6 m/s) means more refraction
+### Why It Failed — Root Cause Analysis
 
-### Results — kwave_geom
+**The real L-matrix is NOT a ray-tracing object.** It encodes beamforming sensitivity:
 
-| Sub-exp | N_update | CNR | SSIM | RMSE | MAE | L-update time | Notes |
-|---------|----------|-----|------|------|-----|--------------|-------|
-| 5a | once | — | — | — | — | — | |
-| 5b | 100 | — | — | — | — | — | |
-| 5c | 50 | — | — | — | — | — | |
-| 5d | — | — | — | — | — | — | |
+1. **Rasterization mismatch**: Siddon ray tracing produces thin 1-pixel lines (~1.3% nnz per row). The real L has broad sensitivity regions (~13.9% nnz per row). The spatial support is 10× too narrow.
 
-### Results — kwave_blob
+2. **Per-row normalization cannot fix support mismatch**: Matching row magnitudes preserves direction but the direction itself is wrong — the sensitivity pattern from beamforming (coherent summation across many elements in a sub-aperture) is fundamentally different from a single element-to-pixel ray.
 
-| Sub-exp | N_update | CNR | SSIM | RMSE | MAE | L-update time | Notes |
-|---------|----------|-----|------|------|-----|--------------|-------|
-| 5a | once | — | — | — | — | — | |
-| 5b | 100 | — | — | — | — | — | |
-| 5c | 50 | — | — | — | — | — | |
-| 5d | — | — | — | — | — | — | |
+3. **Gaussian broadening fails**: Sweeping isotropic Gaussian blur σ from 0.5 to 8.0 pixels, the best row-wise correlation between blurred Siddon and real L was only **0.097** (essentially zero). The real L is not a blurred version of a ray — it encodes multi-element beamforming physics that cannot be replicated by any spatial filter on a geometric ray.
+
+4. **The real L encodes**: coherent sub-aperture summation, steering delays, apodization, the beamformer PSF, and wave-physics effects (diffraction, interference). A Siddon ray from one element to one pixel is the wrong abstraction entirely.
+
+**Conclusion**: Building our own L from ray tracing (straight or bent) is a dead end for this measurement geometry. The iterative bent-ray approach from USCT literature works for ring-array setups where the L IS ray-based, but not for CUTE where the L comes from beamforming.
+
+### Results — kwave_geom (2 debug samples)
+
+| Sub-exp | Description | CNR | SSIM | RMSE | MAE | Notes |
+|---------|-------------|-----|------|------|-----|-------|
+| 5a | Baseline (real L) | 2.36 | 0.77 | 7.86 | 3.01 | Control — expected performance |
+| 5b | Siddon straight + norm | 0.13 | 0.87 | 23.43 | 9.28 | No inclusion localization, fan artifacts |
+| 5c | Eikonal bent + norm | 0.10 | 0.71 | 22.18 | 9.86 | Noisy, speckled, no inclusion |
+| 5d | Broadened Siddon | — | — | — | — | Abandoned: broadening corr=0.097 |
+
+### What Would Make This Work — Questions for Deniz/Orcun
+
+The approach fails because we cannot replicate the beamformed L from ray tracing. To unblock this direction, we need:
+
+1. **The code that generates the L-matrix (A-matrix).** Is it analytically derived from the beamforming model or numerically computed (finite-difference Jacobian)? With the generation code, we could modify it to use eikonal-based travel times while preserving the beamforming structure.
+
+2. **Which elements contribute to each DT pixel?** Our experiment showed the sensitivity is much broader than just the two firing-pair elements. Understanding the sub-aperture, steering delays, and apodization would let us build a correct forward model.
+
+3. **Can L be recomputed for a non-homogeneous SoS background?** Currently L is linearized around homogeneous 1510 m/s. If recomputable for an arbitrary SoS map, that would be the beamforming-native equivalent of "bent-ray L" — exactly what we need.
+
+4. **Is the L computation differentiable (or could it be)?** If so, end-to-end optimization through the beamforming model would bypass the need for a fixed L entirely.
+
+Without the code, a mathematical description of how L is formed (the exact delay-and-sum formula, sub-aperture definition, apodization weights) would let us reimplement it.
+
+### Key Files
+
+- `notebooks/experiment5_geometry_exploration.ipynb` — geometry exploration + broadening analysis (Sections 1-16)
+- `scripts/run_eikonal_bent_ray.py` — experiment script with sub-experiments 5a-5d
+- `scripts/data/experiment5_eikonal/kwave_geom/20260326_184929/` — results and plots
 
 ---
 
@@ -444,8 +463,41 @@ Each experiment branch starts fresh from `k-wave-validation`. Results are record
 
 ---
 
+## Key Takeaways from Completed Experiments
+
+### What has been tried and what we learned
+
+**Tier 1 — Measurement/Solution-Side Corrections (Exp 1-4):**
+- **Exp 1 (Kaipio-Somersalo):** Subtracting the mean mismatch template from measurements does nothing for the INR (MAE 3.49 vs 3.58 baseline). The mismatch energy (0.11%) is too small relative to the INR's implicit regularization. Classical linear solvers (LSQR) catastrophically fail with or without correction (MAE ~283).
+- **Exp 2 (SVD-Constrained INR):** Truncating the INR output to the top-K singular vectors of L hurts at every K tested. The INR's spectral bias already provides optimal implicit regularization — explicit truncation removes information the INR needs. Only unconstrained (K=4096) works.
+- **Exp 3-4 (SVD Loss, Combined):** Skipped. Experiments 1-2 conclusively showed that solution-side constraints cannot close the gap.
+
+**Tier 2 — Forward Model Replacement (Exp 5):**
+- **Exp 5 (Eikonal Bent-Ray):** Attempted to build our own L-matrix from ray tracing (Siddon's algorithm) with eikonal-based bent rays. Failed fundamentally: the real L-matrix encodes beamforming sensitivity (coherent multi-element summation), not geometric ray paths. Row-wise correlation between Siddon L and real L was only 0.097. Gaussian broadening cannot bridge this gap. To make this work, we need the code that generates the real L (the beamforming Jacobian).
+
+### The real problem (reframed 2026-03-28)
+
+The MAE gap (3.5 vs Oracle 1.8) was the initial focus, but the actual clinical problem is **CNR — inclusion visibility**. The INR achieves MAE 3.5 (beating L1=7.0, L2=9.3) by accurately predicting the ~95% homogeneous background, while the inclusion is barely visible (smeared into vertical stripes). This is fundamentally a **limited-angle tomography** problem: 8 firing pairs from a linear array provide too few angular views to resolve a compact inclusion.
+
+### Remaining directions
+
+| Experiment | Status | Prospects |
+|---|---|---|
+| Exp 6 (Banana-Doughnut) | Not started | Same obstacle as Exp 5 — needs beamforming model, not ray kernels |
+| Exp 7 (Joint Correction v2) | Not started | Still viable — works WITH real L, addresses shortcut learning with capacity control |
+| SVD spectral analysis | Not started | Diagnostic: which SVD modes carry inclusion vs background signal? |
+| Ask Deniz/Orcun for L-generation code | Pending | Would unblock Exp 5/6 entirely |
+
+---
+
 ## Change Log
 
 | Date | Experiment | Change | Result |
 |------|-----------|--------|--------|
 | 2026-03-23 | — | Plan created | — |
+| 2026-03-25 | Exp 1 | Kaipio-Somersalo complete | 1a/1b/1d: MAE~283 (catastrophic). 1c: MAE 3.49 (marginal) |
+| 2026-03-25 | Exp 2 | SVD-Constrained INR complete | Truncation hurts at all K. Unconstrained best (MAE 3.58) |
+| 2026-03-25 | Exp 3,4 | Skipped | Solution-side constraints don't help |
+| 2026-03-26 | Exp 5 | Geometry exploration complete | DT indexing, element pairs, rasterization mismatch identified |
+| 2026-03-27 | Exp 5 | Eikonal bent-ray experiments complete | 5a: MAE 3.01, 5b: MAE 9.28, 5c: MAE 9.86. Root cause: beamformed L ≠ ray-traced L |
+| 2026-03-28 | Exp 5 | Broadening analysis complete | Gaussian blur correlation ceiling 0.097. Approach abandoned |
