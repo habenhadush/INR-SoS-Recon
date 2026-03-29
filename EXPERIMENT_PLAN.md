@@ -430,19 +430,174 @@ Training protocol:
 
 ---
 
+## Experiment 8: DeepONet Forward Operator Learning
+
+**Branch**: `experiment/deeponet-forward`
+**Priority**: Tier 2 — HIGH (mid-term presentation)
+**Status**: [ ] NOT STARTED
+
+### Hypothesis
+
+The L-matrix is a linear approximation of the true nonlinear forward operator A: s → d. A DeepONet (Deep Operator Network) can learn this operator from paired (s, d) data, capturing beamforming physics, diffraction, and refraction effects that the linear L misses. If the learned operator generalizes, it can replace L entirely as a differentiable forward model for INR-based reconstruction.
+
+### Motivation
+
+- The L-matrix encodes a first-order linearization around homogeneous 1510 m/s background
+- Real wave propagation is nonlinear: diffraction, refraction, scattering create structured mismatch
+- DeepONet (Lu et al., 2021) provides a universal approximation framework for nonlinear operators
+- We have abundant inverse crime data where d = L @ s is exact — train on this, test transfer
+
+### Method
+
+**Architecture** (DeepONet):
+- **Branch net**: Takes flattened SoS field s (4096,) as input → encodes the function
+- **Trunk net**: Takes ray index/coordinates as input → encodes the output location
+- Output: predicted displacement d_pred for each ray given SoS field s
+- Both branch and trunk are standard MLPs with configurable depth/width
+
+**Training strategy** (staged):
+
+1. **Stage 1: Learn operator on inverse crime data**
+   - Train DeepONet to map s → d using inverse crime paired data where d = L @ s is exact
+   - Validation: DeepONet should reproduce L @ s with very low error
+   - This proves the architecture can represent the forward mapping
+
+2. **Stage 2: Test zero-shot transfer to k-wave data**
+   - Apply the inverse-crime-trained DeepONet to k-wave SoS fields
+   - Compare DeepONet(s_true) vs d_kwave_measured
+   - If residual is smaller than L @ s_true vs d_kwave_measured → learned operator captures some wave physics
+
+3. **Stage 3 (if Stage 2 fails): Fine-tune on k-wave data**
+   - Fine-tune DeepONet on 32 k-wave paired samples (leave-one-out)
+   - If insufficient data: request more k-wave simulations from supervisors
+
+4. **Stage 4: Use learned operator for reconstruction**
+   - Replace `d_pred = L @ s` with `d_pred = DeepONet(s)` in INR training loop
+   - INR optimizes: min_θ ||DeepONet(INR(coords)) - d_meas||²
+   - The learned operator is differentiable → standard backprop through both networks
+
+### Sub-experiments
+
+- [ ] **8a**: Train DeepONet on inverse crime data, validate reconstruction (should match Oracle)
+- [ ] **8b**: Zero-shot transfer — apply to k-wave data, measure residual vs L-matrix residual
+- [ ] **8c**: Fine-tune on k-wave (LOO), reconstruct with learned operator
+- [ ] **8d**: Compare reconstruction quality: DeepONet vs L-matrix vs Oracle
+
+### Success criteria
+
+- 8a: DeepONet reproduces inverse crime forward model with <1% relative error
+- 8b: DeepONet residual on k-wave data is smaller than L-matrix residual (0.11% energy)
+- 8c/8d: Reconstruction MAE closer to Oracle (1.8) than L-matrix INR (3.5)
+- CNR improvement: inclusion more visible than with L-matrix reconstruction
+
+### Key references
+
+- Lu et al. (2021) — "Learning nonlinear operators via DeepONet" (Nature Machine Intelligence)
+- Lu et al. (2022) — "A comprehensive and fair comparison of two neural operators" (arXiv:2111.05512)
+- Lunz et al. (2021) — "On Learned Operator Correction in Inverse Problems"
+
+### Results — kwave_geom
+
+| Sub-exp | Operator error | CNR | SSIM | RMSE | MAE | Notes |
+|---------|---------------|-----|------|------|-----|-------|
+| 8a | — | — | — | — | — | |
+| 8b | — | — | — | — | — | |
+| 8c | — | — | — | — | — | |
+| 8d | — | — | — | — | — | |
+
+---
+
+## Experiment 9: CNR Improvement via Regularization Priors
+
+**Branch**: `experiment/cnr-improvement`
+**Priority**: Tier 2 — HIGH (mid-term presentation)
+**Status**: [ ] NOT STARTED
+
+### Hypothesis
+
+The INR achieves low MAE (3.5) by accurately predicting the ~95% homogeneous background but fails to resolve inclusions (low CNR). This is partly because MSE loss treats all pixels equally, favoring the majority background. Regularization priors that explicitly encourage spatial contrast — Total Variation (TV), edge-preserving penalties, or inclusion-aware loss weighting — can improve CNR while maintaining or improving MAE relative to L1/L2 baselines.
+
+### Motivation
+
+- Current INR: low MAE but poor inclusion visibility (smeared into vertical stripes)
+- L1 (LASSO): MAE 7.0 — worse MAE but may have better edge structure
+- L2 (Tikhonov): MAE 9.3 — smooth, poor edges
+- The limited-angle geometry (8 firing pairs) inherently limits angular resolution, but within those constraints, better priors can improve contrast
+- TV regularization is well-established for preserving edges in ill-posed inverse problems
+
+### Method
+
+**Approach 1: Total Variation Regularization**
+- Add TV penalty to INR training loss: `Loss = ||L @ s - d||² + λ_TV · TV(s)`
+- TV(s) = Σ|∇s| computed on the 64×64 grid (anisotropic or isotropic)
+- Encourages piecewise-constant reconstructions → sharp inclusion boundaries
+- Sweep λ_TV to find optimal trade-off between data fit and edge preservation
+
+**Approach 2: Weighted Loss (Gradient-Aware)**
+- Upweight pixels with high spatial gradient in the reconstruction
+- Two-pass: (1) reconstruct with standard loss, (2) compute gradient magnitude, (3) retrain with gradient-weighted loss
+- Focuses the optimization on inclusion boundaries rather than the flat background
+
+**Approach 3: Multi-Scale / Coarse-to-Fine**
+- Stage 1: Train INR at reduced resolution (32×32) to capture gross contrast
+- Stage 2: Upsample and refine at 64×64 with TV regularization
+- Coarse scale has better angular coverage → captures inclusion location
+
+**Approach 4: Post-Processing Enhancement**
+- Apply contrast-limited adaptive histogram equalization (CLAHE) or similar
+- Not a reconstruction improvement per se, but may make inclusions visible for presentation
+
+### Sub-experiments
+
+- [ ] **9a**: TV regularization — sweep λ_TV ∈ {1e-4, 1e-3, 1e-2, 1e-1, 1.0}
+- [ ] **9b**: Gradient-aware weighted loss (two-pass)
+- [ ] **9c**: Coarse-to-fine multi-scale
+- [ ] **9d**: Comparison panel: L1 vs L2 vs INR vs INR+TV vs Oracle (all 4 metrics)
+
+### Success criteria
+
+- CNR significantly higher than baseline INR (inclusion clearly distinguishable from background)
+- MAE remains competitive (< 7.0, i.e., still beats L1)
+- SSIM improves over L1 baseline (0.649)
+- Visual comparison shows clear inclusion boundary vs the vertical smearing artifact
+
+### Results — kwave_geom
+
+| Sub-exp | λ_TV | CNR | SSIM | RMSE | MAE | Notes |
+|---------|------|-----|------|------|-----|-------|
+| 9a | — | — | — | — | — | |
+| 9b | — | — | — | — | — | |
+| 9c | — | — | — | — | — | |
+| 9d | — | — | — | — | — | |
+
+### Results — kwave_blob
+
+| Sub-exp | λ_TV | CNR | SSIM | RMSE | MAE | Notes |
+|---------|------|-----|------|------|-----|-------|
+| 9a | — | — | — | — | — | |
+| 9b | — | — | — | — | — | |
+| 9c | — | — | — | — | — | |
+| 9d | — | — | — | — | — | |
+
+---
+
 ## Experiment Dependency Graph
 
 ```
 Exp 1 (KS) ──────┐
-                  ├──► Exp 4 (Combined Tier 1) ──► Exp 5 (Eikonal)
-Exp 2 (SVD-INR) ──┤                              ──► Exp 6 (Finite-Freq)
+                  ├──► Exp 4 (Combined Tier 1) ──► Exp 5 (Eikonal) [BLOCKED: needs L-gen code]
+Exp 2 (SVD-INR) ──┤                              ──► Exp 6 (Finite-Freq) [BLOCKED: needs L-gen code]
                   │                               ──► Exp 7 (Joint v2)
 Exp 3 (SVD-Loss) ─┘
+
+Exp 8 (DeepONet) ──────── independent, uses inverse crime data first
+Exp 9 (CNR Improvement) ── independent, works with existing INR pipeline
 ```
 
-Experiments 1, 2, 3 are independent — run in parallel.
-Experiment 4 combines the best of 1-3.
-Experiments 5, 6, 7 build on Tier 1 results.
+Experiments 1, 2, 3 are independent (COMPLETE/SKIPPED).
+Experiment 4 combines the best of 1-3 (SKIPPED).
+Experiments 5, 6 blocked pending L-generation code from Deniz/Orcun.
+Experiments 7, 8, 9 are independent — **active priorities for mid-term**.
 
 ---
 
@@ -450,13 +605,15 @@ Experiments 5, 6, 7 build on Tier 1 results.
 
 ```
 k-wave-validation (base)
-├── experiment/kaipio-somersalo       (Exp 1)
-├── experiment/svd-constrained-inr    (Exp 2)
-├── experiment/svd-mismatch-loss      (Exp 3)
-├── experiment/combined-tier1         (Exp 4, merges best of 1-3)
-├── experiment/eikonal-bent-ray       (Exp 5)
-├── experiment/finite-frequency-L     (Exp 6)
-└── experiment/joint-correction-v2    (Exp 7)
+├── experiment/kaipio-somersalo       (Exp 1) — COMPLETE
+├── experiment/svd-constrained-inr    (Exp 2) — COMPLETE
+├── experiment/svd-mismatch-loss      (Exp 3) — SKIPPED
+├── experiment/combined-tier1         (Exp 4) — SKIPPED
+├── experiment/eikonal-bent-ray       (Exp 5) — COMPLETE (FAILED)
+├── experiment/finite-frequency-L     (Exp 6) — BLOCKED
+├── experiment/joint-correction-v2    (Exp 7) — TODO
+├── experiment/deeponet-forward       (Exp 8) — TODO ← mid-term
+└── experiment/cnr-improvement        (Exp 9) — TODO ← mid-term
 ```
 
 Each experiment branch starts fresh from `k-wave-validation`. Results are recorded in this file on the base branch after each experiment concludes.
@@ -481,12 +638,16 @@ The MAE gap (3.5 vs Oracle 1.8) was the initial focus, but the actual clinical p
 
 ### Remaining directions
 
-| Experiment | Status | Prospects |
-|---|---|---|
-| Exp 6 (Banana-Doughnut) | Not started | Same obstacle as Exp 5 — needs beamforming model, not ray kernels |
-| Exp 7 (Joint Correction v2) | Not started | Still viable — works WITH real L, addresses shortcut learning with capacity control |
-| SVD spectral analysis | Not started | Diagnostic: which SVD modes carry inclusion vs background signal? |
-| Ask Deniz/Orcun for L-generation code | Pending | Would unblock Exp 5/6 entirely |
+| Experiment | Status | Priority | Prospects |
+|---|---|---|---|
+| Exp 6 (Banana-Doughnut) | Not started | Blocked | Same obstacle as Exp 5 — needs beamforming model, not ray kernels |
+| Exp 7 (Joint Correction v2) | Not started | **HIGH — mid-term** | Still viable — works WITH real L, addresses shortcut learning with capacity control |
+| Exp 8 (DeepONet Forward Operator) | Not started | **HIGH — mid-term** | Learn operator s→d on inverse crime data, test transfer to k-wave |
+| Exp 9 (CNR Improvement) | Not started | **HIGH — mid-term** | TV regularization + inclusion-aware priors to beat L1/L2 visually |
+| Ask Deniz/Orcun for L-generation code | Pending | HIGH | Would unblock Exp 5/6 and enable FMM with correct beamforming model |
+
+### Action item: L-generation code
+Ask Deniz/Orcun for the MATLAB code that generates the L-matrix (A-matrix). With it, we could recompute L for non-homogeneous SoS backgrounds — the beamforming-native equivalent of bent-ray iteration. This would unblock Exp 5/6 entirely.
 
 ---
 
@@ -501,3 +662,6 @@ The MAE gap (3.5 vs Oracle 1.8) was the initial focus, but the actual clinical p
 | 2026-03-26 | Exp 5 | Geometry exploration complete | DT indexing, element pairs, rasterization mismatch identified |
 | 2026-03-27 | Exp 5 | Eikonal bent-ray experiments complete | 5a: MAE 3.01, 5b: MAE 9.28, 5c: MAE 9.86. Root cause: beamformed L ≠ ray-traced L |
 | 2026-03-28 | Exp 5 | Broadening analysis complete | Gaussian blur correlation ceiling 0.097. Approach abandoned |
+| 2026-03-29 | Exp 8 | Plan added: DeepONet Forward Operator | Train on inverse crime, test transfer to k-wave |
+| 2026-03-29 | Exp 9 | Plan added: CNR Improvement | TV regularization + priors to improve inclusion visibility |
+| 2026-03-29 | — | Mid-term pivot | Focus on Exp 7, 8, 9 for presentation. Exp 5/6 blocked pending L-gen code |
