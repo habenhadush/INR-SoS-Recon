@@ -424,8 +424,8 @@ def optimize_full_forward_operator(sample, L_matrix, model, label, config: ec, u
             reg_loss += config.reg_weight * (s_norm ** 2).mean()
         if config.tv_weight > 0:
             s_img = s_phys.reshape(64, 64)
-            tv_x  = ((s_img[:, 1:] - s_img[:, :-1]) ** 2).mean()
-            tv_z  = ((s_img[1:, :] - s_img[:-1, :]) ** 2).mean()
+            tv_x  = torch.abs(s_img[:, 1:] - s_img[:, :-1]).mean()
+            tv_z  = torch.abs(s_img[1:, :] - s_img[:-1, :]).mean()
             reg_loss += config.tv_weight * (tv_x + tv_z)
 
         total_loss = loss + reg_loss

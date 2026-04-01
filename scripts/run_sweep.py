@@ -98,7 +98,7 @@ def update_registry(sweep_id: str, updates: dict, registry_file: Path = None):
     with open(reg_path) as f:
         registry = json.load(f)
     for entry in registry:
-        if entry["sweep_id"] == sweep_id:
+        if entry.get("sweep_id") == sweep_id:
             entry.update(updates)
     with open(reg_path, "w") as f:
         json.dump(registry, f, indent=2)
@@ -206,7 +206,7 @@ def main():
         with open(reg_file) as f:
             registry = json.load(f)
     reg_entry = next(
-        (e for e in registry if e["sweep_id"] == args.sweep_id), {}
+        (e for e in registry if e.get("sweep_id") == args.sweep_id), {}
     )
     entity  = reg_entry.get("entity")
     project = reg_entry.get("project", args.project)
