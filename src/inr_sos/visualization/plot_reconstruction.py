@@ -172,13 +172,13 @@ def plot_method_comparison(results: dict,
                             cmap_sos: str = "RdBu_r",
                             show: bool = True) -> plt.Figure:
     """
-    Multi-method comparison figure — one row per method, 3 columns:
-    GT | Reconstruction | Abs. Error.
+    Multi-method comparison figure — one row per method, 4 columns:
+    GT | Reconstruction | Abs. Error | Convergence.
 
     Parameters
     ----------
     results : dict of {method_label: result_dict}
-              result_dict must have 's_phys'
+              result_dict must have 's_phys', optionally 'loss_history'
     sample  : dataset sample dict (must have 's_gt_raw')
     """
     import torch
@@ -195,12 +195,13 @@ def plot_method_comparison(results: dict,
     norm_sos = _make_diverging_norm(vmin=v_min, vcenter=bg_sos, vmax=v_max)
 
     n_methods = len(results)
-    fig, axes = plt.subplots(n_methods + 1, 3,
-                              figsize=(15, 4.5 * (n_methods + 1)))
+    fig, axes = plt.subplots(n_methods + 1, 4,
+                              figsize=(20, 4.5 * (n_methods + 1)),
+                              gridspec_kw={"width_ratios": [1, 1, 1, 1.1]})
     fig.suptitle(title, fontsize=14, fontweight="bold", y=1.01)
 
     # First row: Ground Truth only
-    for col in range(3):
+    for col in range(4):
         ax = axes[0, col]
         if col == 0:
             im = ax.imshow(v_gt, cmap=cmap_sos, norm=norm_sos,
@@ -244,6 +245,21 @@ def plot_method_comparison(results: dict,
         axes[row, 2].set_title("Signed Difference (m/s)", fontsize=10)
         axes[row, 2].axis("off")
         plt.colorbar(im3, ax=axes[row, 2], fraction=0.046, pad=0.04)
+
+        # Convergence graph
+        loss_hist = result_dict.get("loss_history", [])
+        ax_loss = axes[row, 3]
+        if loss_hist:
+            ax_loss.plot(loss_hist, color="#1f77b4", linewidth=1.2)
+            ax_loss.set_yscale("log")
+            ax_loss.set_title(f"Convergence", fontsize=10)
+            ax_loss.set_xlabel("Iteration", fontsize=9)
+            ax_loss.set_ylabel("Loss (log)", fontsize=9)
+            ax_loss.grid(True, which="both", linestyle="--", alpha=0.4)
+            ax_loss.spines["top"].set_visible(False)
+            ax_loss.spines["right"].set_visible(False)
+        else:
+            ax_loss.set_visible(False)
 
     plt.tight_layout()
     if save_path:

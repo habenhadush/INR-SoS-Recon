@@ -30,12 +30,12 @@ _SLOWNESS_MAX = 1.0 / 1200.0   # slowest tissue  ~8.33e-4
 
 
 def _compute_data_loss(residual_seconds, mask, config):
-    """Compute data-fidelity loss with switchable MSE / Huber.
+    """Compute data-fidelity loss with switchable MSE / MAE / Huber.
 
     Args:
         residual_seconds: (d_pred - d_meas) in seconds, NOT yet masked.
         mask:             binary mask (1 = valid ray).
-        config:           ExperimentConfig instance.
+        config:           ExperimentConfig instance (loss_type: "mse"|"mae"|"huber").
 
     Returns:
         Scalar loss tensor (mean over valid rays).
@@ -47,13 +47,14 @@ def _compute_data_loss(residual_seconds, mask, config):
     n_valid = mask.sum() + 1e-8
 
     if config.loss_type == "huber":
-        # F.huber_loss with reduction='sum' then normalise manually
         target = torch.zeros_like(residual_scaled)
         loss = F.huber_loss(
             residual_scaled, target,
             delta=config.huber_delta,
             reduction="sum",
         ) / n_valid
+    elif config.loss_type == "mae":
+        loss = torch.abs(residual_scaled).sum() / n_valid
     else:
         # Default: MSE (matches original behaviour)
         loss = (residual_scaled ** 2).sum() / n_valid
@@ -132,6 +133,8 @@ class _EarlyStopper:
                 delta=config.huber_delta,
                 reduction="sum",
             ) / n_val
+        elif config.loss_type == "mae":
+            val_loss = torch.abs(residual_val_scaled).sum() / n_val
         else:
             val_loss = (residual_val_scaled ** 2).sum() / n_val
 

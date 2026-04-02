@@ -43,7 +43,7 @@ datasets:
         steps: [200, 500, 750, 1000]
         tv_weight: {distribution: "log_uniform_values", min: 1e-3, max: 1.0}
         reg_weight: {distribution: "log_uniform_values", min: 1e-4, max: 1e-1}
-        loss_type: ["mse", "huber"]
+        loss_type: ["mse", "mae", "huber"]
         huber_delta: {distribution: "log_uniform_values", min: 0.01, max: 2.0}
         clamp_slowness: [true, false]
         early_stopping: [true]
@@ -75,7 +75,7 @@ datasets:
         steps: [200, 500, 750, 1000]
         tv_weight: {distribution: "log_uniform_values", min: 1e-3, max: 1.0}
         reg_weight: {distribution: "log_uniform_values", min: 1e-4, max: 1e-1}
-        loss_type: ["mse", "huber"]
+        loss_type: ["mse", "mae", "huber"]
         huber_delta: {distribution: "log_uniform_values", min: 0.01, max: 2.0}
         clamp_slowness: [true, false]
         early_stopping: [true]
@@ -126,7 +126,7 @@ datasets:
         steps: [200, 500, 750, 1000]
         tv_weight: {distribution: "log_uniform_values", min: 1e-3, max: 1.0}
         reg_weight: {distribution: "log_uniform_values", min: 1e-4, max: 1e-1}
-        loss_type: ["mse", "huber"]
+        loss_type: ["mse", "mae", "huber"]
         huber_delta: {distribution: "log_uniform_values", min: 0.01, max: 2.0}
         clamp_slowness: [true, false]
         early_stopping: [true]
@@ -157,7 +157,7 @@ datasets:
         steps: [200, 500, 750, 1000]
         tv_weight: {distribution: "log_uniform_values", min: 1e-3, max: 1.0}
         reg_weight: {distribution: "log_uniform_values", min: 1e-4, max: 1e-1}
-        loss_type: ["mse", "huber"]
+        loss_type: ["mse", "mae", "huber"]
         huber_delta: {distribution: "log_uniform_values", min: 0.01, max: 2.0}
         clamp_slowness: [true, false]
         early_stopping: [true]
@@ -189,7 +189,7 @@ datasets:
         steps: [200, 500, 750, 1000]
         tv_weight: {distribution: "log_uniform_values", min: 1e-3, max: 1.0}
         reg_weight: {distribution: "log_uniform_values", min: 1e-4, max: 1e-1}
-        loss_type: ["mse", "huber"]
+        loss_type: ["mse", "mae", "huber"]
         huber_delta: {distribution: "log_uniform_values", min: 0.01, max: 2.0}
         clamp_slowness: [true, false]
         early_stopping: [true]
@@ -221,7 +221,7 @@ datasets:
         steps: [200, 500, 750, 1000]
         tv_weight: {distribution: "log_uniform_values", min: 1e-3, max: 1.0}
         reg_weight: {distribution: "log_uniform_values", min: 1e-4, max: 1e-1}
-        loss_type: ["mse", "huber"]
+        loss_type: ["mse", "mae", "huber"]
         huber_delta: {distribution: "log_uniform_values", min: 0.01, max: 2.0}
         clamp_slowness: [true, false]
         early_stopping: [true]
