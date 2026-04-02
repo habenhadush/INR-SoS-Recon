@@ -88,8 +88,9 @@ def plot(result_dict: dict,
     v_gt  = np.clip(1.0 / (s_gt_raw + 1e-8), SOS_MIN, SOS_MAX)
     v_rec = np.clip(1.0 / (s_phys   + 1e-8), SOS_MIN, SOS_MAX)
 
-    v_gt  = v_gt.reshape(grid_shape)
-    v_rec = v_rec.reshape(grid_shape)
+    # Reshape with Fortran order: transducer at top, depth downward
+    v_gt  = v_gt.reshape(grid_shape, order="F")
+    v_rec = v_rec.reshape(grid_shape, order="F")
 
     error_map = np.abs(v_gt - v_rec)
     mae       = float(np.mean(error_map))
@@ -187,7 +188,7 @@ def plot_method_comparison(results: dict,
     if hasattr(s_gt_raw, "detach"):
         s_gt_raw = s_gt_raw.detach().cpu().numpy()
     s_gt_raw = np.asarray(s_gt_raw, dtype=np.float32).flatten()
-    v_gt     = np.clip(1.0 / (s_gt_raw + 1e-8), SOS_MIN, SOS_MAX).reshape(grid_shape)
+    v_gt     = np.clip(1.0 / (s_gt_raw + 1e-8), SOS_MIN, SOS_MAX).reshape(grid_shape, order="F")
 
     v_min  = max(SOS_MIN, float(v_gt.min()) - 10)
     v_max  = min(SOS_MAX, float(v_gt.max()) + 10)
@@ -218,7 +219,7 @@ def plot_method_comparison(results: dict,
         if hasattr(s_phys, "detach"):
             s_phys = s_phys.detach().cpu().numpy()
         s_phys  = np.asarray(s_phys, dtype=np.float32).flatten()
-        v_rec   = np.clip(1.0 / (s_phys + 1e-8), SOS_MIN, SOS_MAX).reshape(grid_shape)
+        v_rec   = np.clip(1.0 / (s_phys + 1e-8), SOS_MIN, SOS_MAX).reshape(grid_shape, order="F")
         err_map = np.abs(v_gt - v_rec)
         mae     = float(np.mean(err_map))
 

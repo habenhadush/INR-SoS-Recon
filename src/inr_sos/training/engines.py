@@ -168,11 +168,11 @@ def plot(result_dict, sample, grid_shape=(64, 64), title="Reconstruction"):
     """
     
     # 1. Extract Data & Convert to Numpy
-    # Ground Truth (Raw Slowness)
-    s_gt = sample['s_gt_raw'].view(grid_shape).detach().cpu().numpy()
-    
+    # Ground Truth (Raw Slowness) — reshape with Fortran order (transducer at top)
+    s_gt = sample['s_gt_raw'].detach().cpu().numpy().flatten().reshape(grid_shape, order="F")
+
     # Reconstruction (Physical Slowness)
-    s_rec = result_dict['s_phys'].view(grid_shape).detach().cpu().numpy()
+    s_rec = result_dict['s_phys'].detach().cpu().numpy().flatten().reshape(grid_shape, order="F")
     
     # Loss History
     loss_hist = result_dict['loss_history']

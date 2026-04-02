@@ -254,7 +254,7 @@ def _slowness_to_sos(s_flat):
     slowness_min = 1.0 / 1800.0
     slowness_max = 1.0 / 1200.0
     s_clamped = np.clip(s_flat, slowness_min, slowness_max)
-    return (1.0 / s_clamped).reshape(64, 64)
+    return (1.0 / s_clamped).reshape(64, 64, order="F")
 
 
 def plot_sample_comparison(tv_results, baseline_agg, dataset, sample_idx, out_dir):

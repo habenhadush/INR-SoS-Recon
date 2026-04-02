@@ -323,7 +323,7 @@ def run_inr_config(sweep_cfg, dataset, indices, base_config, run_tag, log,
 def _make_sample_plot(s_phys_np, s_gt_np, loss_history, idx, method, mtype,
                       metrics=None):
     """Per-sample plot. With GT: 4 panels. Without GT: 2 panels."""
-    v_rec = np.clip(1.0 / (s_phys_np.reshape(64, 64) + 1e-8), 1200, 1800)
+    v_rec = np.clip(1.0 / (s_phys_np.flatten().reshape(64, 64, order="F") + 1e-8), 1200, 1800)
     has_gt = s_gt_np is not None
 
     n_panels = 4 if has_gt else 2
@@ -337,7 +337,7 @@ def _make_sample_plot(s_phys_np, s_gt_np, loss_history, idx, method, mtype,
 
     col = 0
     if has_gt:
-        v_gt = np.clip(1.0 / (s_gt_np.reshape(64, 64) + 1e-8), 1200, 1800)
+        v_gt = np.clip(1.0 / (s_gt_np.flatten().reshape(64, 64, order="F") + 1e-8), 1200, 1800)
         im0 = axes[col].imshow(v_gt, cmap="jet", vmin=1400, vmax=1600)
         axes[col].set_title("Ground Truth (m/s)"); axes[col].axis("off")
         plt.colorbar(im0, ax=axes[col], fraction=0.046, pad=0.04)
@@ -394,7 +394,7 @@ def _make_recon_grid(all_results, n_vis=2, rng_seed=42):
             gt_entry = next(s for s in all_results[0]["per_sample"]
                             if s["idx"] == vis_idx)
             s_gt_np = gt_entry["s_gt_np"].flatten().astype(np.float32)
-            v_gt = np.clip(1.0 / (s_gt_np + 1e-8), 1400, 1600).reshape(64, 64)
+            v_gt = np.clip(1.0 / (s_gt_np.flatten() + 1e-8), 1400, 1600).reshape(64, 64, order="F")
 
             ax_gt = axes[row_sos, 0]
             im_gt = ax_gt.imshow(v_gt, cmap="jet", vmin=1400, vmax=1600,
@@ -415,7 +415,7 @@ def _make_recon_grid(all_results, n_vis=2, rng_seed=42):
         for col, result in enumerate(all_results, start=col_offset):
             entry = next(s for s in result["per_sample"] if s["idx"] == vis_idx)
             s_phys = entry["s_phys_np"].flatten().astype(np.float32)
-            v_rec = np.clip(1.0 / (s_phys + 1e-8), 1400, 1600).reshape(64, 64)
+            v_rec = np.clip(1.0 / (s_phys.flatten() + 1e-8), 1400, 1600).reshape(64, 64, order="F")
 
             ax_sos = axes[row_sos, col]
             im = ax_sos.imshow(v_rec, cmap="jet", vmin=1400, vmax=1600,

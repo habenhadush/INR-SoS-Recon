@@ -33,6 +33,12 @@ class USGrid:
         return x_norm, z_norm
     
 
+    def normalize_dt(self, x, z):
+        """Normalize DT grid coordinates to [-1, 1] using the DT grid's own extent."""
+        x_norm = 2 * (x - self.x_dt.min()) / (self.x_dt.max() - self.x_dt.min()) - 1
+        z_norm = 2 * (z - self.z_dt.min()) / (self.z_dt.max() - self.z_dt.min()) - 1
+        return x_norm, z_norm
+
     def denormalize(self, x_norm, z_norm):
         """ 
             Denormalize coordinates from [-1, 1] range back to original

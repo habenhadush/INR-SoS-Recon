@@ -613,7 +613,7 @@ def make_reconstruction_grid(all_results: list,
         gt_entry = next(s for s in all_results[0]["per_sample"]
                         if s["idx"] == vis_idx)
         s_gt_np  = gt_entry["s_gt_np"].flatten().astype(np.float32)
-        v_gt     = np.clip(1.0 / (s_gt_np + 1e-8), 1400, 1600).reshape(64, 64)
+        v_gt     = np.clip(1.0 / (s_gt_np + 1e-8), 1400, 1600).reshape(64, 64, order="F")
         bg_sos   = float(np.median(v_gt))
 
         # ── Column 0: Ground Truth ─────────────────────────────────────
@@ -643,7 +643,7 @@ def make_reconstruction_grid(all_results: list,
             entry   = next(s for s in result["per_sample"]
                            if s["idx"] == vis_idx)
             s_phys  = entry["s_phys_np"].flatten().astype(np.float32)
-            v_rec   = np.clip(1.0 / (s_phys + 1e-8), 1400, 1600).reshape(64, 64)
+            v_rec   = np.clip(1.0 / (s_phys + 1e-8), 1400, 1600).reshape(64, 64, order="F")
             err_map = np.abs(v_gt - v_rec)
             mae_val = float(np.mean(err_map))
 
@@ -712,7 +712,7 @@ def save_per_sample_plots(all_results: list, out_dir: Path,
         gt_entry = next(s for s in all_results[0]["per_sample"]
                         if s["idx"] == vis_idx)
         s_gt_np = gt_entry["s_gt_np"].flatten().astype(np.float32)
-        v_gt = np.clip(1.0 / (s_gt_np + 1e-8), 1400, 1600).reshape(64, 64)
+        v_gt = np.clip(1.0 / (s_gt_np + 1e-8), 1400, 1600).reshape(64, 64, order="F")
         bg_sos = float(np.median(v_gt))
 
         fig, axes = plt.subplots(
@@ -751,7 +751,7 @@ def save_per_sample_plots(all_results: list, out_dir: Path,
             entry = next(s for s in result["per_sample"]
                          if s["idx"] == vis_idx)
             s_phys = entry["s_phys_np"].flatten().astype(np.float32)
-            v_rec = np.clip(1.0 / (s_phys + 1e-8), 1400, 1600).reshape(64, 64)
+            v_rec = np.clip(1.0 / (s_phys + 1e-8), 1400, 1600).reshape(64, 64, order="F")
             err_map = np.abs(v_gt - v_rec)
             mae_val = float(np.mean(err_map))
 
