@@ -102,6 +102,12 @@ def run_single_sample(sample, dataset, grid, denoise_cfg, recon_cfg, idx):
 
     results = {}
 
+    # ── L1/L2 baselines (no optimization, just metrics) ─────────────────
+    for key, label in [("s_l1_recon", "l1"), ("s_l2_recon", "l2")]:
+        if key in sample:
+            m = calculate_metrics(sample[key], s_gt)
+            results[label] = {"metrics": m, "s_phys": sample[key]}
+
     # ── Condition 1: Raw measurements (baseline) ─────────────────────────
     log.info(f"  [idx={idx}] Raw reconstruction...")
     model_raw = build_recon_model(recon_cfg)
@@ -126,7 +132,7 @@ def run_single_sample(sample, dataset, grid, denoise_cfg, recon_cfg, idx):
     log.info(f"  [idx={idx}] Denoised reconstruction...")
     sample_denoised = copy.copy(sample)
     sample_denoised["d_meas"] = d_denoised
-    sample_denoised["mask"] = torch.ones_like(d_denoised)  # all valid
+    sample_denoised["mask"] = sample["mask"]  # keep original valid-ray mask
 
     model_dn = build_recon_model(recon_cfg)
     t0 = time.perf_counter()
@@ -190,19 +196,36 @@ def _to_sos(s_flat):
 
 
 def plot_sample_comparison(sample, results, idx, out_dir):
-    """3-row plot: GT | Raw | Denoised, each with SoS + error + convergence."""
+    """Comparison plot: GT | L1 | L2 | Raw INR | Denoised INR.
+
+    Each method gets: SoS map + Abs Error side by side.
+    INR methods also get a convergence column.
+    """
+    from inr_sos.evaluation.metrics import calculate_metrics
+
     v_gt = _to_sos(sample["s_gt_raw"])
 
-    conditions = [
-        ("Raw", results["raw"]),
-        ("Denoised", results["denoised"]),
-    ]
+    # Build list of (label, v_rec, metrics, loss_history)
+    rows = []
 
-    n_cond = len(conditions)
-    fig, axes = plt.subplots(n_cond + 1, 3, figsize=(15, 4.5 * (n_cond + 1)))
-    fig.suptitle(f"Sample {idx} — Raw vs Denoised Reconstruction", fontsize=13)
+    # L1/L2 baselines from dataset
+    for key, label in [("s_l1_recon", "L1 Baseline"), ("s_l2_recon", "L2 Baseline")]:
+        if key in sample:
+            v = _to_sos(sample[key])
+            m = calculate_metrics(sample[key], sample["s_gt_raw"])
+            rows.append((label, v, m, None))
 
-    # Row 0: GT
+    # Raw and Denoised INR
+    for label, res_key in [("Raw INR", "raw"), ("Denoised INR", "denoised")]:
+        res = results[res_key]
+        v = _to_sos(res["s_phys"])
+        rows.append((label, v, res["metrics"], res.get("loss_history")))
+
+    n_rows = 1 + len(rows)  # GT row + method rows
+    fig, axes = plt.subplots(n_rows, 3, figsize=(16, 4.2 * n_rows))
+    fig.suptitle(f"Sample {idx} — Reconstruction Comparison", fontsize=13)
+
+    # Row 0: Ground Truth
     im = axes[0, 0].imshow(v_gt, cmap="jet", vmin=1400, vmax=1600)
     axes[0, 0].set_title("Ground Truth (m/s)", fontsize=10)
     axes[0, 0].axis("off")
@@ -210,12 +233,10 @@ def plot_sample_comparison(sample, results, idx, out_dir):
     axes[0, 1].axis("off")
     axes[0, 2].axis("off")
 
-    for row, (label, res) in enumerate(conditions, 1):
-        v_rec = _to_sos(res["s_phys"])
+    for row, (label, v_rec, m, loss_hist) in enumerate(rows, 1):
         err = np.abs(v_gt - v_rec)
-        m = res["metrics"]
 
-        # SoS
+        # SoS map
         im = axes[row, 0].imshow(v_rec, cmap="jet", vmin=1400, vmax=1600)
         axes[row, 0].set_title(
             f"{label}  MAE={m['MAE']:.1f}  CNR={m['CNR']:.2f}", fontsize=10
@@ -223,21 +244,23 @@ def plot_sample_comparison(sample, results, idx, out_dir):
         axes[row, 0].axis("off")
         plt.colorbar(im, ax=axes[row, 0], fraction=0.046, pad=0.04)
 
-        # Error
+        # Error map
         im_e = axes[row, 1].imshow(err, cmap="hot", vmin=0, vmax=50)
-        axes[row, 1].set_title(f"Abs. Error", fontsize=10)
+        axes[row, 1].set_title("Abs. Error", fontsize=10)
         axes[row, 1].axis("off")
         plt.colorbar(im_e, ax=axes[row, 1], fraction=0.046, pad=0.04)
 
-        # Convergence
-        if res.get("loss_history"):
-            axes[row, 2].plot(res["loss_history"], color="#1f77b4", linewidth=1)
+        # Convergence (only for INR methods)
+        if loss_hist:
+            axes[row, 2].plot(loss_hist, color="#1f77b4", linewidth=1)
             axes[row, 2].set_yscale("log")
             axes[row, 2].set_title("Convergence", fontsize=10)
             axes[row, 2].set_xlabel("Iteration", fontsize=9)
             axes[row, 2].grid(True, which="both", ls="--", alpha=0.4)
             axes[row, 2].spines["top"].set_visible(False)
             axes[row, 2].spines["right"].set_visible(False)
+        else:
+            axes[row, 2].axis("off")
 
     plt.tight_layout()
     fp = out_dir / f"sample_{idx}_comparison.png"
@@ -246,48 +269,84 @@ def plot_sample_comparison(sample, results, idx, out_dir):
     return fp
 
 
-def plot_displacement_fields(sample, d_denoised, idx, out_dir, pair_idx=0):
-    """Visualize raw vs denoised displacement for one firing pair."""
+def plot_displacement_fields(sample, d_denoised, idx, out_dir):
+    """Visualize raw vs denoised displacement for all 8 firing pairs.
+
+    Layout: 8 rows (one per pair) × 4 columns:
+      Col 0: Raw (valid only)
+      Col 1: Denoised (ALL pixels — shows hole-filling + cone extrapolation)
+      Col 2: Difference on valid pixels (denoised - raw)
+      Col 3: Filled holes only (pixels that were NaN in raw, now predicted)
+    Orientation: transducer at top, depth downward (order="F").
+    """
     d_raw = sample["d_meas"].numpy().flatten()
     d_dn = d_denoised.numpy().flatten()
     mask = sample["mask"].numpy().flatten()
 
-    start = pair_idx * 16384
-    end = (pair_idx + 1) * 16384
+    n_pairs = 8
+    fig, axes = plt.subplots(n_pairs, 4, figsize=(20, 4 * n_pairs))
+    fig.suptitle(f"Sample {idx} — Displacement Fields (all pairs)", fontsize=14, y=1.0)
 
-    # Reshape to 128×128 (ix outer, iz inner)
-    raw_2d = d_raw[start:end].reshape(128, 128)
-    dn_2d = d_dn[start:end].reshape(128, 128)
-    mask_2d = mask[start:end].reshape(128, 128)
+    col_titles = ["Raw (valid only)", "Denoised (all pixels)",
+                   "Diff on valid", "Filled holes"]
 
-    # Mask invalid pixels for raw
-    raw_masked = np.where(mask_2d > 0.5, raw_2d, np.nan)
+    for k in range(n_pairs):
+        start = k * 16384
+        end = (k + 1) * 16384
 
-    fig, axes = plt.subplots(1, 3, figsize=(15, 4.5))
-    fig.suptitle(f"Sample {idx}, Pair {pair_idx} — Displacement Field", fontsize=12)
+        # Reshape with order="F": depth (z) as rows, lateral (x) as cols
+        raw_2d = d_raw[start:end].reshape(128, 128, order="F")
+        dn_2d = d_dn[start:end].reshape(128, 128, order="F")
+        mask_2d = mask[start:end].reshape(128, 128, order="F")
 
-    vmin = np.nanmin(raw_masked)
-    vmax = np.nanmax(raw_masked)
+        # Masked versions
+        raw_masked = np.where(mask_2d > 0.5, raw_2d, np.nan)
+        holes_only = np.where(mask_2d < 0.5, dn_2d, np.nan)  # NaN pixels filled by denoiser
 
-    im0 = axes[0].imshow(raw_masked, cmap="viridis", vmin=vmin, vmax=vmax)
-    axes[0].set_title("Raw (valid only)")
-    axes[0].axis("off")
-    plt.colorbar(im0, ax=axes[0], fraction=0.046, pad=0.04)
+        vmin = np.nanmin(raw_masked)
+        vmax = np.nanmax(raw_masked)
 
-    im1 = axes[1].imshow(dn_2d, cmap="viridis", vmin=vmin, vmax=vmax)
-    axes[1].set_title("Denoised (all pixels)")
-    axes[1].axis("off")
-    plt.colorbar(im1, ax=axes[1], fraction=0.046, pad=0.04)
+        # Col 0: Raw valid
+        im0 = axes[k, 0].imshow(raw_masked, cmap="viridis", vmin=vmin, vmax=vmax,
+                                  origin="upper")
+        axes[k, 0].set_ylabel(f"Pair {k}", fontsize=10, fontweight="bold")
+        axes[k, 0].set_xticks([]); axes[k, 0].set_yticks([])
+        if k == 0:
+            axes[k, 0].set_title(col_titles[0], fontsize=11)
+        plt.colorbar(im0, ax=axes[k, 0], fraction=0.046, pad=0.04)
 
-    diff = np.where(mask_2d > 0.5, dn_2d - raw_2d, np.nan)
-    abs_max = np.nanmax(np.abs(diff)) if not np.all(np.isnan(diff)) else 1.0
-    im2 = axes[2].imshow(diff, cmap="RdBu_r", vmin=-abs_max, vmax=abs_max)
-    axes[2].set_title("Difference (denoised - raw)")
-    axes[2].axis("off")
-    plt.colorbar(im2, ax=axes[2], fraction=0.046, pad=0.04)
+        # Col 1: Denoised ALL pixels (unmasked — shows the full INR prediction)
+        im1 = axes[k, 1].imshow(dn_2d, cmap="viridis", vmin=vmin, vmax=vmax,
+                                  origin="upper")
+        axes[k, 1].axis("off")
+        if k == 0:
+            axes[k, 1].set_title(col_titles[1], fontsize=11)
+        plt.colorbar(im1, ax=axes[k, 1], fraction=0.046, pad=0.04)
+
+        # Col 2: Difference on valid pixels
+        diff = np.where(mask_2d > 0.5, dn_2d - raw_2d, np.nan)
+        abs_max = np.nanmax(np.abs(diff)) if not np.all(np.isnan(diff)) else 1.0
+        im2 = axes[k, 2].imshow(diff, cmap="RdBu_r", vmin=-abs_max, vmax=abs_max,
+                                  origin="upper")
+        axes[k, 2].axis("off")
+        if k == 0:
+            axes[k, 2].set_title(col_titles[2], fontsize=11)
+        plt.colorbar(im2, ax=axes[k, 2], fraction=0.046, pad=0.04)
+
+        # Col 3: Filled holes (only the pixels that were NaN)
+        im3 = axes[k, 3].imshow(holes_only, cmap="viridis", vmin=vmin, vmax=vmax,
+                                  origin="upper")
+        axes[k, 3].axis("off")
+        n_holes = int((mask_2d < 0.5).sum())
+        if k == 0:
+            axes[k, 3].set_title(col_titles[3], fontsize=11)
+        axes[k, 3].text(0.02, 0.98, f"{n_holes} px", transform=axes[k, 3].transAxes,
+                         fontsize=8, va="top", color="white",
+                         bbox=dict(boxstyle="round", fc="black", alpha=0.6))
+        plt.colorbar(im3, ax=axes[k, 3], fraction=0.046, pad=0.04)
 
     plt.tight_layout()
-    fp = out_dir / f"sample_{idx}_pair{pair_idx}_displacement.png"
+    fp = out_dir / f"sample_{idx}_displacement_all_pairs.png"
     fig.savefig(fp, dpi=150, bbox_inches="tight")
     plt.close(fig)
     return fp
@@ -379,11 +438,10 @@ def main():
 
         # Save plots
         plot_sample_comparison(sample, results, idx, run_dir)
-        # Displacement field for pairs 0 and 4 (different coverage patterns)
+        # Displacement fields for all 8 pairs
         d_dn_full = results["denoised"].get("d_denoised")
         if d_dn_full is not None:
-            for pk in [0, 4]:
-                plot_displacement_fields(sample, d_dn_full, idx, run_dir, pair_idx=pk)
+            plot_displacement_fields(sample, d_dn_full, idx, run_dir)
 
     # ── Summary table ─────────────────────────────────────────────────────
     log.info(f"\n{'='*80}")
@@ -393,13 +451,18 @@ def main():
              f"{'SSIM±std':>14} {'CNR±std':>14}")
     log.info(f"  {'─'*75}")
 
-    for cond in ["raw", "denoised"]:
+    conditions = ["l1", "l2", "raw", "denoised"]
+    for cond in conditions:
+        if cond not in all_results[0]:
+            continue
         maes = [r[cond]["metrics"]["MAE"] for r in all_results]
         rmses = [r[cond]["metrics"]["RMSE"] for r in all_results]
         ssims = [r[cond]["metrics"]["SSIM"] for r in all_results]
         cnrs = [r[cond]["metrics"]["CNR"] for r in all_results]
+        label = {"l1": "L1 Baseline", "l2": "L2 Baseline",
+                 "raw": "Raw INR", "denoised": "Denoised INR"}[cond]
         log.info(
-            f"  {cond.capitalize():<15}"
+            f"  {label:<15}"
             f"  {np.mean(maes):>6.2f}±{np.std(maes):<5.2f}"
             f"  {np.mean(rmses):>6.2f}±{np.std(rmses):<5.2f}"
             f"  {np.mean(ssims):>6.3f}±{np.std(ssims):<5.3f}"
@@ -424,6 +487,7 @@ def main():
         "per_sample": [
             {
                 "idx": r["idx"],
+                **{k: r[k]["metrics"] for k in ["l1", "l2"] if k in r},
                 "raw": r["raw"]["metrics"],
                 "denoised": r["denoised"]["metrics"],
                 "oracle_comparison": r["oracle_comparison"],
@@ -452,7 +516,9 @@ def main():
         columns = ["Condition", "MAE_mean", "MAE_std", "CNR_mean", "CNR_std",
                     "SSIM_mean", "SSIM_std"]
         data = []
-        for cond in ["raw", "denoised"]:
+        for cond in ["l1", "l2", "raw", "denoised"]:
+            if cond not in all_results[0]:
+                continue
             maes = [r[cond]["metrics"]["MAE"] for r in all_results]
             cnrs = [r[cond]["metrics"]["CNR"] for r in all_results]
             ssims = [r[cond]["metrics"]["SSIM"] for r in all_results]

@@ -581,6 +581,135 @@ The INR achieves low MAE (3.5) by accurately predicting the ~95% homogeneous bac
 
 ---
 
+## Experiment 10: Measurement-Domain INR Denoiser (Blind)
+
+**Branch**: `experiment/measurement-denoiser`
+**Priority**: Tier 2 — COMPLETE
+**Status**: [x] COMPLETE — modest improvement, ceiling reached
+
+### Hypothesis
+
+The INR's spectral bias can act as a measurement-domain regularizer: fitting a small INR to each firing pair's 128×128 DT displacement grid smooths high-frequency model mismatch and fills NaN holes within the cone, producing cleaner measurements for downstream reconstruction.
+
+### Method
+
+Two-stage pipeline (no changes to reconstruction engine):
+1. **Stage 1 (Denoise)**: For each of 8 firing pairs, train a FourierMLP INR on valid pixels of the 128×128 DT grid. The INR learns (x_dt, z_dt) → displacement. Spectral bias smooths valid pixels; spatial interpolation fills NaN holes.
+2. **Stage 2 (Reconstruct)**: Replace `d_meas` with denoised measurements, keep original mask, run standard `optimize_full_forward_operator`.
+
+### Key insights
+
+1. **What the denoiser actually does**: It low-pass filters the displacement field, removing high-frequency components indiscriminately (both real signal and mismatch). It is measurement-domain regularization, not denoising in the traditional sense.
+2. **Why it helps**: The ill-conditioned inverse (κ = 2.69×10¹³) amplifies high frequencies disproportionately. Removing them prevents amplification into artifacts.
+3. **Why it can't close the gap**: The blind INR cannot distinguish mismatch from signal. 85-87% of mismatch energy is low-frequency (passes through the low-pass filter). The fundamental problem is the L-matrix, not the measurements.
+4. **Oracle paradox**: Denoised measurements are actually farther from `L @ s_true` (-20 to -27% worse), yet reconstruction improves. This confirms the smoothing removes real signal too, but the net effect is positive because the removed components were being amplified by the ill-conditioning.
+
+### Sweep results — kwave_geom (10 samples, 75 configs)
+
+| Method | MAE | CNR | SSIM |
+|--------|-----|-----|------|
+| **L1 Baseline** | **6.02±0.81** | **2.64±1.25** | **0.730** |
+| L2 Baseline | 9.49±1.32 | 2.73±1.03 | 0.802 |
+| Best denoiser (s5.0_st500_h128) | 12.67±3.47 | 1.88±0.91 | 0.529 |
+| Raw INR (no denoising) | 13.95±2.60 | 1.69±0.87 | 0.525 |
+
+- Best denoiser: ~9% MAE improvement over raw INR (13.95 → 12.67)
+- Still 2× worse than L1 baseline (6.02)
+- Sweet spot: scale=5.0 (moderate bandwidth), steps=300-500, hidden=128+
+- High scale (10.0) catastrophically fails (MAE 40-260): INR overfits mismatch
+- Low scale (0.5) ≈ raw INR: over-smoothing destroys real signal
+
+### Takeaway
+
+The blind measurement-domain denoiser provides modest improvement (~9%) but hits a hard ceiling far from L1 baseline. The fundamental limitation is that it cannot selectively suppress mismatch vs signal. **Next step: joint optimization where the denoiser has access to the forward model**, allowing it to learn which measurement components to suppress based on their effect on reconstruction quality.
+
+### Key files
+
+- `src/inr_sos/training/denoise_engine.py` — per-pair INR denoiser
+- `scripts/run_denoised_reconstruction.py` — two-stage experiment script
+- `scripts/run_denoiser_sweep.py` — hyperparameter sweep script
+- `scripts/data/denoiser_sweep/kwave_geom/20260403_152216/` — sweep results
+
+---
+
+## Experiment 11: Joint Denoiser + Reconstructor Optimization
+
+**Branch**: `experiment/joint-denoiser-recon`
+**Priority**: Tier 1 — HIGH (natural evolution of Exp 10)
+**Status**: [ ] NOT STARTED
+
+### Hypothesis
+
+The blind denoiser (Exp 10) hits a ceiling because it has no knowledge of the forward model — it smooths indiscriminately. By jointly optimizing the denoiser INR and the reconstruction INR end-to-end, the denoiser can learn to produce measurements that are specifically compatible with the L-matrix reconstruction, selectively suppressing components that the ill-conditioned inverse would amplify into artifacts.
+
+### Motivation
+
+- Exp 10 showed: blind smoothing gives ~9% improvement but plateaus at MAE 12.67 (vs L1 baseline 6.02)
+- The denoiser's limitation: can't distinguish mismatch from signal without forward model knowledge
+- Joint training gives the denoiser a reconstruction-quality gradient signal — "this change to d improved/hurt the reconstruction"
+- This is the measurement-domain analog of learned regularization
+
+### Method
+
+**Architecture**: Two INRs, one pipeline:
+- **INR_denoise**: Per-pair FourierMLP (same as Exp 10). Maps (x_dt, z_dt) → denoised displacement. Trained on valid pixels with MSE to raw measurements + regularized by reconstruction loss.
+- **INR_recon**: Standard ReluMLP (same as current pipeline). Maps (x_sos, z_sos) → slowness.
+
+**Forward pass**:
+```
+d_denoised = INR_denoise(coords_dt)          # per-pair, concat 8 pairs
+s_pred = INR_recon(coords_sos)               # (4096, 1) slowness field
+d_pred = L @ s_pred                           # forward model prediction
+loss = ||mask * (d_pred - d_denoised)||²      # data fidelity on valid rays
+      + λ_fit · ||mask * (d_denoised - d_raw)||²  # denoiser stays close to data
+```
+
+**Training strategies** (sub-experiments):
+
+1. **End-to-end**: Both INRs optimized simultaneously. Gradient flows from reconstruction loss through d_denoised back to INR_denoise.
+2. **Alternating**: Fix denoiser → optimize reconstructor for N steps → fix reconstructor → optimize denoiser for M steps → repeat.
+3. **Staged**: Stage 1: pretrain denoiser (blind, as Exp 10). Stage 2: pretrain reconstructor on denoised data. Stage 3: joint fine-tuning with both gradients.
+
+### Sub-experiments
+
+- [ ] **11a**: End-to-end joint optimization (both INRs, single loss)
+- [ ] **11b**: Alternating minimization (fix one, optimize other)
+- [ ] **11c**: Staged training (pretrain → joint fine-tune)
+- [ ] **11d**: Ablation: vary λ_fit (denoiser data-fidelity weight) to control how far denoiser can deviate from raw measurements
+- [ ] **11e**: Best config on kwave_blob (generalization test)
+
+### Success criteria
+
+- MAE significantly below blind denoiser ceiling (12.67) — target: < 8.0
+- Approach or beat L1 baseline (6.02)
+- CNR > L1 baseline (2.64) — joint optimization should preserve inclusion structure
+- Denoiser learns structured corrections (not just uniform smoothing) — visualize d_denoised vs d_raw difference maps, should show anatomically meaningful patterns
+- No collapse: denoiser shouldn't ignore raw data entirely (monitor ||d_denoised - d_raw|| / ||d_raw||)
+
+### Risks
+
+- **Denoiser shortcut**: INR_denoise learns to output d = L @ s_pred directly (bypassing raw measurements). Mitigate with λ_fit penalty.
+- **Mode collapse**: Both INRs converge to trivial solution (uniform background). Monitor CNR throughout training.
+- **Gradient competition**: Denoiser and reconstructor fight each other. Alternating minimization (11b) may be more stable.
+
+### Results — kwave_geom
+
+| Sub-exp | λ_fit | MAE | CNR | SSIM | RMSE | Notes |
+|---------|-------|-----|-----|------|------|-------|
+| 11a | — | — | — | — | — | |
+| 11b | — | — | — | — | — | |
+| 11c | — | — | — | — | — | |
+| 11d | — | — | — | — | — | |
+| 11e | — | — | — | — | — | |
+
+### Results — kwave_blob
+
+| Sub-exp | λ_fit | MAE | CNR | SSIM | RMSE | Notes |
+|---------|-------|-----|-----|------|------|-------|
+| 11e | — | — | — | — | — | |
+
+---
+
 ## Experiment Dependency Graph
 
 ```
@@ -592,12 +721,14 @@ Exp 3 (SVD-Loss) ─┘
 
 Exp 8 (DeepONet) ──────── independent, uses inverse crime data first
 Exp 9 (CNR Improvement) ── independent, works with existing INR pipeline
+Exp 10 (Blind Denoiser) ──► Exp 11 (Joint Denoiser+Recon) ← ACTIVE
 ```
 
 Experiments 1, 2, 3 are independent (COMPLETE/SKIPPED).
 Experiment 4 combines the best of 1-3 (SKIPPED).
 Experiments 5, 6 blocked pending L-generation code from Deniz/Orcun.
-Experiments 7, 8, 9 are independent — **active priorities for mid-term**.
+**Exp 10 complete** — blind denoiser ceiling reached (~9% improvement).
+**Exp 11 is the active priority** — joint optimization to break through the ceiling.
 
 ---
 
@@ -613,7 +744,9 @@ k-wave-validation (base)
 ├── experiment/finite-frequency-L     (Exp 6) — BLOCKED
 ├── experiment/joint-correction-v2    (Exp 7) — TODO
 ├── experiment/deeponet-forward       (Exp 8) — TODO ← mid-term
-└── experiment/cnr-improvement        (Exp 9) — TODO ← mid-term
+├── experiment/cnr-improvement        (Exp 9) — TODO ← mid-term
+├── experiment/measurement-denoiser   (Exp 10) — COMPLETE (ceiling reached)
+└── experiment/joint-denoiser-recon   (Exp 11) — TODO ← ACTIVE PRIORITY
 ```
 
 Each experiment branch starts fresh from `k-wave-validation`. Results are recorded in this file on the base branch after each experiment concludes.
@@ -641,9 +774,11 @@ The MAE gap (3.5 vs Oracle 1.8) was the initial focus, but the actual clinical p
 | Experiment | Status | Priority | Prospects |
 |---|---|---|---|
 | Exp 6 (Banana-Doughnut) | Not started | Blocked | Same obstacle as Exp 5 — needs beamforming model, not ray kernels |
-| Exp 7 (Joint Correction v2) | Not started | **HIGH — mid-term** | Still viable — works WITH real L, addresses shortcut learning with capacity control |
+| Exp 7 (Joint Correction v2) | Not started | Medium | Superseded by Exp 11 (same idea, better framing from Exp 10 insights) |
 | Exp 8 (DeepONet Forward Operator) | Not started | **HIGH — mid-term** | Learn operator s→d on inverse crime data, test transfer to k-wave |
 | Exp 9 (CNR Improvement) | Not started | **HIGH — mid-term** | TV regularization + inclusion-aware priors to beat L1/L2 visually |
+| Exp 10 (Blind Denoiser) | **COMPLETE** | — | ~9% improvement, ceiling reached. Blind INR can't separate mismatch from signal. |
+| **Exp 11 (Joint Denoiser+Recon)** | Not started | **HIGH — ACTIVE** | Break blind denoiser ceiling by giving denoiser forward model knowledge. Target: approach L1 baseline. |
 | Ask Deniz/Orcun for L-generation code | Pending | HIGH | Would unblock Exp 5/6 and enable FMM with correct beamforming model |
 
 ### Action item: L-generation code
@@ -665,3 +800,6 @@ Ask Deniz/Orcun for the MATLAB code that generates the L-matrix (A-matrix). With
 | 2026-03-29 | Exp 8 | Plan added: DeepONet Forward Operator | Train on inverse crime, test transfer to k-wave |
 | 2026-03-29 | Exp 9 | Plan added: CNR Improvement | TV regularization + priors to improve inclusion visibility |
 | 2026-03-29 | — | Mid-term pivot | Focus on Exp 7, 8, 9 for presentation. Exp 5/6 blocked pending L-gen code |
+| 2026-04-02 | Exp 10 | Blind measurement denoiser implemented | Per-pair FourierMLP denoiser, two-stage pipeline |
+| 2026-04-03 | Exp 10 | Denoiser sweep complete (75 configs, 10 samples) | Best MAE 12.67 (s5.0_st500_h128) vs raw 13.95 — ~9% improvement. L1 baseline still 6.02. Ceiling reached. |
+| 2026-04-04 | Exp 11 | Joint denoiser+reconstructor plan added | End-to-end, alternating, and staged training strategies. Target: break blind denoiser ceiling, approach L1 baseline. |
