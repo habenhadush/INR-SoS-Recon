@@ -4,14 +4,23 @@ run_joint_denoiser_recon.py
 ---------------------------
 Experiment 11: Joint denoiser + reconstructor (staged training).
 
-Compares: L1 | L2 | Raw INR | Joint (staged, varying λ_fit)
+Compares: L1 | L2 | Raw INR | Joint (staged, with adaptive λ strategies)
 
 Usage:
-    # Quick test (2 samples)
-    python scripts/run_joint_denoiser_recon.py --n_samples 2
+    # Fixed λ (default)
+    python scripts/run_joint_denoiser_recon.py --n_samples 5 --lambda_fit 0.07
 
-    # Sweep lambda_fit
-    python scripts/run_joint_denoiser_recon.py --n_samples 3 --lambda_fit 0.07 0.1 0.5 1.0
+    # Cosine decay
+    python scripts/run_joint_denoiser_recon.py --n_samples 5 \
+        --lambda_strategy cosine --lambda_max 1.0 --lambda_min 0.01
+
+    # Loss-ratio balanced
+    python scripts/run_joint_denoiser_recon.py --n_samples 5 \
+        --lambda_strategy balanced --target_ratio 1.0
+
+    # Residual-normalized (sweep α)
+    python scripts/run_joint_denoiser_recon.py --n_samples 5 \
+        --lambda_strategy residual --alpha 0.1 0.5 1.0
 """
 
 import argparse
@@ -149,6 +158,15 @@ def plot_sample_comparison(sample, all_methods, idx, out_dir):
                 ax2.grid(True, which="both", ls="--", alpha=0.4)
                 ax2.spines["top"].set_visible(False)
                 ax2.spines["right"].set_visible(False)
+
+                # Overlay λ trajectory on secondary y-axis
+                lam_traj = res.get("lambda_trajectory")
+                if lam_traj and len(set(lam_traj)) > 1:
+                    ax_lam = ax2.twinx()
+                    ax_lam.plot(lam_traj, color="#2ca02c", linewidth=1,
+                                label="λ(t)", alpha=0.6, linestyle="--")
+                    ax_lam.set_ylabel("λ", fontsize=8, color="#2ca02c")
+                    ax_lam.tick_params(axis="y", labelcolor="#2ca02c", labelsize=7)
         else:
             axes[row, 2].axis("off")
 
@@ -212,6 +230,18 @@ def main():
     parser.add_argument("--joint_steps", type=int, default=2000)
     parser.add_argument("--pretrain_dn_steps", type=int, default=300)
     parser.add_argument("--pretrain_rc_steps", type=int, default=500)
+    # Lambda strategy
+    parser.add_argument("--lambda_strategy", default="fixed",
+                        choices=["fixed", "cosine", "balanced", "residual"],
+                        help="Adaptive λ strategy for Stage 3")
+    parser.add_argument("--lambda_max", type=float, default=1.0,
+                        help="Cosine/balanced: starting λ (cosine) or upper bound (balanced)")
+    parser.add_argument("--lambda_min", type=float, default=0.01,
+                        help="Cosine/balanced: ending λ (cosine) or lower bound (balanced)")
+    parser.add_argument("--target_ratio", type=float, default=1.0,
+                        help="Balanced: target L_recon / L_fit ratio")
+    parser.add_argument("--alpha", nargs="+", type=float, default=[0.5],
+                        help="Residual: scaling factor(s) for per-sample λ")
     # Denoiser config
     parser.add_argument("--scale", type=float, default=5.0)
     parser.add_argument("--hidden_features", type=int, default=128)
@@ -236,7 +266,15 @@ def main():
     log.info("=" * 70)
     log.info("  Experiment 11: Joint Denoiser + Reconstructor (staged)")
     log.info(f"  Dataset: {args.dataset}")
-    log.info(f"  lambda_fit: {args.lambda_fit}")
+    log.info(f"  λ strategy: {args.lambda_strategy}")
+    if args.lambda_strategy == "fixed":
+        log.info(f"  lambda_fit: {args.lambda_fit}")
+    elif args.lambda_strategy == "cosine":
+        log.info(f"  λ_max={args.lambda_max}, λ_min={args.lambda_min}")
+    elif args.lambda_strategy == "balanced":
+        log.info(f"  target_ratio={args.target_ratio}, λ_init={args.lambda_fit}")
+    elif args.lambda_strategy == "residual":
+        log.info(f"  α={args.alpha}")
     log.info(f"  Denoiser: scale={denoise_cfg['scale']}, h={denoise_cfg['hidden_features']}")
     log.info(f"  Output: {run_dir}")
     log.info("=" * 70)
@@ -269,6 +307,9 @@ def main():
     recon_cfg = make_recon_config()
     if hasattr(dataset, "pix2time") and dataset.pix2time is not None:
         recon_cfg.time_scale = 1.0 / dataset.pix2time
+    elif ds_cfg.get("pix2time") is not None:
+        recon_cfg.time_scale = 1.0 / float(ds_cfg["pix2time"])
+        log.info(f"  time_scale from yaml pix2time: {recon_cfg.time_scale:.4e}")
 
     samples = [dataset[idx] for idx in indices]
 
@@ -299,9 +340,36 @@ def main():
             "loss_history": res["loss_history"],
         })
 
-    # Joint optimization (staged) for each lambda_fit
-    for lf in args.lambda_fit:
-        method_label = f"Joint(sta,λ={lf})"
+    # ── Build joint configs based on lambda strategy ───────────────────────
+    joint_configs = []  # list of (method_label, lambda_fit, lambda_cfg)
+
+    if args.lambda_strategy == "fixed":
+        for lf in args.lambda_fit:
+            joint_configs.append((f"Joint(fix,λ={lf})", lf, {}))
+
+    elif args.lambda_strategy == "cosine":
+        lam_cfg = {"lambda_max": args.lambda_max, "lambda_min": args.lambda_min}
+        label = f"Joint(cos,{args.lambda_max}→{args.lambda_min})"
+        joint_configs.append((label, args.lambda_max, lam_cfg))
+
+    elif args.lambda_strategy == "balanced":
+        for lf in args.lambda_fit:
+            lam_cfg = {
+                "target_ratio": args.target_ratio,
+                "lambda_min": args.lambda_min,
+                "lambda_max": args.lambda_max,
+            }
+            label = f"Joint(bal,r={args.target_ratio},λ₀={lf})"
+            joint_configs.append((label, lf, lam_cfg))
+
+    elif args.lambda_strategy == "residual":
+        for a in args.alpha:
+            lam_cfg = {"alpha": a}
+            label = f"Joint(res,α={a})"
+            joint_configs.append((label, 0.1, lam_cfg))  # base λ unused for residual
+
+    # ── Joint optimization ───────────────────────────────────────────────
+    for method_label, lf, lam_cfg in joint_configs:
         log.info(f"\n── {method_label} ──")
         all_results[method_label] = []
 
@@ -318,6 +386,8 @@ def main():
                 denoise_cfg=denoise_cfg,
                 lambda_fit=lf,
                 mode="staged",
+                lambda_strategy=args.lambda_strategy,
+                lambda_cfg=lam_cfg,
                 pretrain_denoiser_steps=args.pretrain_dn_steps,
                 pretrain_recon_steps=args.pretrain_rc_steps,
                 joint_steps=args.joint_steps,
@@ -336,6 +406,7 @@ def main():
                 "loss_history": res["loss_history"],
                 "recon_losses": res.get("recon_losses"),
                 "fit_losses": res.get("fit_losses"),
+                "lambda_trajectory": res.get("lambda_trajectory"),
             })
 
     # ── Summary table ────────────────────────────────────────────────────
@@ -366,9 +437,9 @@ def main():
         report_results = {
             method: per_sample
             for method, per_sample in all_results.items()
-            if method in ("L1", "L2", "Raw INR") or "sta" in method
+            if method in ("L1", "L2", "Raw INR") or method.startswith("Joint")
         }
-        if not any("sta" in m for m in report_results):
+        if not any(m.startswith("Joint") for m in report_results):
             log.warning("  No staged results to plot — skipping report figures")
         else:
             log.info("\n  Generating report figures (staged only) ...")
@@ -415,6 +486,7 @@ def main():
         "timestamp": timestamp,
         "dataset": args.dataset,
         "mode": "staged",
+        "lambda_strategy": args.lambda_strategy,
         "lambda_fit_values": args.lambda_fit,
         "denoise_cfg": denoise_cfg,
         "n_samples": len(indices),

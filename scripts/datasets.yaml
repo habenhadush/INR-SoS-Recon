@@ -54,6 +54,31 @@ datasets:
         epochs: [100, 150, 200]
         batch_size: [2048, 4096, 8192]
         time_scale: [1e6, 2e7]
+    joint_sweep:
+      n_eval_samples: 5
+      time_scale: "auto"
+      parameters:
+        # Denoiser
+        dn_scale: {distribution: "log_uniform_values", min: 0.5, max: 20.0}
+        dn_hidden_features: {values: [64, 128, 256]}
+        dn_hidden_layers: {values: [2, 3]}
+        # Reconstructor
+        rc_hidden_features: {values: [128, 256, 512]}
+        rc_hidden_layers: {values: [2, 3, 4]}
+        rc_lr: {distribution: "log_uniform_values", min: 1e-5, max: 1e-3}
+        rc_mapping_size: {values: [32, 64, 128]}
+        # Training schedule
+        pretrain_dn_steps: {values: [200, 300, 500]}
+        pretrain_rc_steps: {values: [300, 500, 800]}
+        joint_steps: {values: [1000, 2000, 3000]}
+        joint_lr_factor: {distribution: "log_uniform_values", min: 0.01, max: 0.5}
+        # Lambda strategy
+        lambda_strategy: {values: ["fixed", "cosine", "balanced", "residual"]}
+        lambda_fit: {distribution: "log_uniform_values", min: 0.01, max: 2.0}
+        lambda_max: {distribution: "log_uniform_values", min: 0.1, max: 5.0}
+        lambda_min: {distribution: "log_uniform_values", min: 0.001, max: 0.1}
+        target_ratio: {distribution: "log_uniform_values", min: 0.1, max: 10.0}
+        alpha: {distribution: "log_uniform_values", min: 0.05, max: 2.0}
 
   kwave_blob:
     name: "k-Wave Blob (70 samples)"
@@ -86,6 +111,31 @@ datasets:
         epochs: [100, 150, 200]
         batch_size: [2048, 4096, 8192]
         time_scale: [1e6, 2e7]
+    joint_sweep:
+      n_eval_samples: 5
+      time_scale: "auto"
+      parameters:
+        # Denoiser
+        dn_scale: {distribution: "log_uniform_values", min: 0.5, max: 20.0}
+        dn_hidden_features: {values: [64, 128, 256]}
+        dn_hidden_layers: {values: [2, 3]}
+        # Reconstructor
+        rc_hidden_features: {values: [128, 256, 512]}
+        rc_hidden_layers: {values: [2, 3, 4]}
+        rc_lr: {distribution: "log_uniform_values", min: 1e-5, max: 1e-3}
+        rc_mapping_size: {values: [32, 64, 128]}
+        # Training schedule
+        pretrain_dn_steps: {values: [200, 300, 500]}
+        pretrain_rc_steps: {values: [300, 500, 800]}
+        joint_steps: {values: [1000, 2000, 3000]}
+        joint_lr_factor: {distribution: "log_uniform_values", min: 0.01, max: 0.5}
+        # Lambda strategy
+        lambda_strategy: {values: ["fixed", "cosine", "balanced", "residual"]}
+        lambda_fit: {distribution: "log_uniform_values", min: 0.01, max: 2.0}
+        lambda_max: {distribution: "log_uniform_values", min: 0.1, max: 5.0}
+        lambda_min: {distribution: "log_uniform_values", min: 0.001, max: 0.1}
+        target_ratio: {distribution: "log_uniform_values", min: 0.1, max: 10.0}
+        alpha: {distribution: "log_uniform_values", min: 0.05, max: 2.0}
 
   kwave_arranged:
     name: "k-Wave Arranged Measurements (train)"

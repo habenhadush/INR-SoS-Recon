@@ -1,0 +1,34 @@
+Hey Orcun, Deniz,
+
+Here is what I have tried on denoising (measurment space regularization) + joint reconstruction approach you mentioned I should explore.
+
+L_total = L_recon + λ_fit · L_fit 
+
+Where:
+
+L_recon = ||mask · (L @ s_pred - d_denoised)||² -> on the valid rays
+
+- This is the reconstruction fidelity — how well the predicted slowness field, passed through the forward model L,matches the denoised measurements
+  s_pred comes from the reconstruction INR and d_denoised comes from the denoiser INR
+
+L_fit = ||mask · (d_denoised - d_raw)||² -> on valid rays
+
+- This is the data fidelity constraint — how far the denoiser is allowed to deviate from the raw measurements
+
+λ_fit is the balance between these two objectives:
+
+- High λ (e.g., 1.0): denoiser stays close to raw data → conservative, less correction, better CNR but higher MAE
+- Low λ (e.g., 0.03–0.07): denoiser has more freedom to modify measurements → more mismatch correction, lower MAE but more variance and risk of drift
+
+The problem you discovered is that the optimal λ is sample-dependent — each sample has different SoS structure, sothe mismatch between the ray-tracing L-matrix and real wave physics varies. A sample with an inclusion near the center creates different diffraction than one near the edge, so the "right" amount of denoising freedom differs
+
+I have tried a fixed λ and it seems to have lower MAE and I have also tried cosine decay which is giving me higher CNR at the expense of MAE.
+
+I will try to test and tune the idea on the blob and phantom data next.
+
+I have attached the results for fixed λ and cosine decay.
+
+Please let me know if there is anything I need to explore in this regard.
+
+
+
