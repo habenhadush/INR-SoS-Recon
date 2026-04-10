@@ -48,6 +48,25 @@ _SLOWNESS_MIN = 1.0 / 1800.0
 _SLOWNESS_MAX = 1.0 / 1200.0
 
 
+# ─── Regularization ──────────────────────────────────────────────────────────
+
+def _compute_reg(s_norm, s_phys, config):
+    """Compute L2 + TV regularization on the reconstructor output.
+
+    Reads config.reg_weight and config.tv_weight (both default 0).
+    Returns a scalar tensor (0 if no regularization).
+    """
+    reg = torch.tensor(0.0, device=s_phys.device)
+    if config.reg_weight > 0:
+        reg = reg + config.reg_weight * (s_norm ** 2).mean()
+    if config.tv_weight > 0:
+        s_img = s_phys.reshape(64, 64)
+        tv_x = torch.abs(s_img[:, 1:] - s_img[:, :-1]).mean()
+        tv_z = torch.abs(s_img[1:, :] - s_img[:-1, :]).mean()
+        reg = reg + config.tv_weight * (tv_x + tv_z)
+    return reg
+
+
 # ─── Lambda scheduling ────────────────────────────────────────────────────────
 
 def _compute_lambda(strategy, step, total_steps, loss_recon, loss_fit, state):
@@ -164,7 +183,7 @@ def optimize_joint(
     use_wandb=False,
     label="joint",
 ):
-    """Joint denoiser + reconstructor optimization (staged training).
+    """Joint denoiser + reconstructor optimization.
 
     Args:
         sample:       dataset sample dict.
@@ -174,16 +193,16 @@ def optimize_joint(
         recon_config: ExperimentConfig for reconstruction.
         denoise_cfg:  dict for denoiser INR config (defaults to DEFAULT_DENOISE_CFG).
         lambda_fit:   base λ for data-fidelity loss (used by fixed/cosine/balanced).
-        mode:         training mode (only 'staged' supported).
+        mode:         'staged' (default), 'end_to_end', or 'alternating'.
         lambda_strategy: "fixed" | "cosine" | "balanced" | "residual"
         lambda_cfg:   strategy-specific parameters dict. Keys depend on strategy:
                       cosine:   lambda_max, lambda_min
                       balanced: target_ratio, eta, lambda_min, lambda_max
                       residual: alpha
-        pretrain_denoiser_steps: steps for stage 1.
-        pretrain_recon_steps:    steps for stage 2.
+        pretrain_denoiser_steps: steps for stage 1 (staged only).
+        pretrain_recon_steps:    steps for stage 2 (staged only).
         joint_steps:  total joint training steps (defaults to recon_config.steps).
-        joint_lr_factor: LR multiplier for Stage 3 (default 0.1).
+        joint_lr_factor: LR multiplier for Stage 3 (default 0.1, staged only).
         use_wandb:    whether to log to W&B.
         label:        run label for logging.
 
@@ -197,10 +216,7 @@ def optimize_joint(
     if joint_steps is None:
         joint_steps = recon_config.steps
 
-    if mode != "staged":
-        raise ValueError(f"Only 'staged' mode is supported, got: {mode}")
-
-    log.info(f"\n--- Joint Denoiser+Recon: {label} (staged) on {_DEVICE} ---")
+    log.info(f"\n--- Joint Denoiser+Recon: {label} ({mode}) on {_DEVICE} ---")
     log.info(f"  lambda_strategy={lambda_strategy}, lambda_fit={lambda_fit}")
     if lambda_cfg:
         log.info(f"  lambda_cfg={lambda_cfg}")
@@ -220,13 +236,170 @@ def optimize_joint(
     recon_model = recon_model.to(_DEVICE)
     coords_dt = _build_dt_coords(grid)  # (16384, 2) on device
 
-    return _train_staged(
+    # ── Dispatch to training mode ─────────────────────────────────────────
+    if mode == "end_to_end":
+        return _train_end_to_end(
+            denoiser, recon_model, coords_dt, coords_sos,
+            d_raw, mask, L, s_mean, s_std, time_scale,
+            recon_config, lambda_fit, joint_steps, use_wandb, label,
+        )
+    elif mode == "alternating":
+        return _train_alternating(
+            denoiser, recon_model, coords_dt, coords_sos,
+            d_raw, mask, L, s_mean, s_std, time_scale,
+            recon_config, lambda_fit, joint_steps, use_wandb, label,
+        )
+    elif mode == "staged":
+        return _train_staged(
+            denoiser, recon_model, coords_dt, coords_sos,
+            d_raw, mask, L, s_mean, s_std, time_scale,
+            recon_config, denoise_cfg, lambda_fit,
+            lambda_strategy, lambda_cfg,
+            pretrain_denoiser_steps, pretrain_recon_steps, joint_steps,
+            joint_lr_factor, use_wandb, label,
+        )
+    else:
+        raise ValueError(f"Unknown mode: {mode}")
+
+
+# ─── End-to-end training ─────────────────────────────────────────────────────
+
+def _train_end_to_end(
+    denoiser, recon_model, coords_dt, coords_sos,
+    d_raw, mask, L, s_mean, s_std, time_scale,
+    config, lambda_fit, steps, use_wandb, label,
+):
+    all_params = list(denoiser.parameters()) + list(recon_model.parameters())
+    optimizer = optim.Adam(all_params, lr=config.lr)
+    scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=steps)
+
+    loss_history = []
+    recon_losses = []
+    fit_losses = []
+    best_loss = float("inf")
+    best_state_dn = copy.deepcopy(denoiser.state_dict())
+    best_state_rc = copy.deepcopy(recon_model.state_dict())
+    n_valid = mask.sum() + 1e-8
+
+    pbar = tqdm(range(steps), desc=f"Joint E2E ({label})")
+    for step in pbar:
+        denoiser.train()
+        recon_model.train()
+        optimizer.zero_grad()
+
+        d_denoised = denoiser(coords_dt)
+        s_norm = recon_model(coords_sos)
+        s_phys = (s_norm * s_std + s_mean).clamp(min=_SLOWNESS_MIN, max=_SLOWNESS_MAX)
+        d_pred = L @ s_phys
+
+        recon_res = (d_pred - d_denoised) * mask * time_scale
+        loss_recon = (recon_res ** 2).sum() / n_valid
+
+        fit_res = (d_denoised - d_raw) * mask * time_scale
+        loss_fit = (fit_res ** 2).sum() / n_valid
+
+        total_loss = loss_recon + lambda_fit * loss_fit
+        total_loss.backward()
+        optimizer.step()
+        scheduler.step()
+
+        loss_val = total_loss.item()
+        loss_history.append(loss_val)
+        recon_losses.append(loss_recon.item())
+        fit_losses.append(loss_fit.item())
+
+        if loss_val < best_loss:
+            best_loss = loss_val
+            best_state_dn = copy.deepcopy(denoiser.state_dict())
+            best_state_rc = copy.deepcopy(recon_model.state_dict())
+
+        if step % 50 == 0:
+            pbar.set_description(
+                f"L_recon={loss_recon.item():.4f} L_fit={loss_fit.item():.4f}"
+            )
+
+    denoiser.load_state_dict(best_state_dn)
+    recon_model.load_state_dict(best_state_rc)
+
+    return _extract_results(
         denoiser, recon_model, coords_dt, coords_sos,
-        d_raw, mask, L, s_mean, s_std, time_scale,
-        recon_config, denoise_cfg, lambda_fit,
-        lambda_strategy, lambda_cfg,
-        pretrain_denoiser_steps, pretrain_recon_steps, joint_steps,
-        joint_lr_factor, use_wandb, label,
+        s_mean, s_std, loss_history, recon_losses, fit_losses,
+    )
+
+
+# ─── Alternating training ────────────────────────────────────────────────────
+
+def _train_alternating(
+    denoiser, recon_model, coords_dt, coords_sos,
+    d_raw, mask, L, s_mean, s_std, time_scale,
+    config, lambda_fit, steps, use_wandb, label,
+    alt_interval=100,
+):
+    opt_denoiser = optim.Adam(denoiser.parameters(), lr=config.lr)
+    opt_recon = optim.Adam(recon_model.parameters(), lr=config.lr)
+
+    loss_history = []
+    recon_losses = []
+    fit_losses = []
+    best_loss = float("inf")
+    best_state_dn = copy.deepcopy(denoiser.state_dict())
+    best_state_rc = copy.deepcopy(recon_model.state_dict())
+    n_valid = mask.sum() + 1e-8
+
+    pbar = tqdm(range(steps), desc=f"Joint Alt ({label})")
+    for step in pbar:
+        block = (step // alt_interval) % 2
+        train_recon = (block == 0)
+
+        denoiser.train()
+        recon_model.train()
+
+        if train_recon:
+            opt_recon.zero_grad()
+        else:
+            opt_denoiser.zero_grad()
+
+        d_denoised = denoiser(coords_dt)
+        s_norm = recon_model(coords_sos)
+        s_phys = (s_norm * s_std + s_mean).clamp(min=_SLOWNESS_MIN, max=_SLOWNESS_MAX)
+        d_pred = L @ s_phys
+
+        recon_res = (d_pred - d_denoised) * mask * time_scale
+        loss_recon = (recon_res ** 2).sum() / n_valid
+
+        fit_res = (d_denoised - d_raw) * mask * time_scale
+        loss_fit = (fit_res ** 2).sum() / n_valid
+
+        if train_recon:
+            loss_recon.backward()
+            opt_recon.step()
+        else:
+            total_loss = loss_recon + lambda_fit * loss_fit
+            total_loss.backward()
+            opt_denoiser.step()
+
+        loss_val = (loss_recon + lambda_fit * loss_fit).item()
+        loss_history.append(loss_val)
+        recon_losses.append(loss_recon.item())
+        fit_losses.append(loss_fit.item())
+
+        if loss_val < best_loss:
+            best_loss = loss_val
+            best_state_dn = copy.deepcopy(denoiser.state_dict())
+            best_state_rc = copy.deepcopy(recon_model.state_dict())
+
+        if step % 50 == 0:
+            phase = "recon" if train_recon else "denoise"
+            pbar.set_description(
+                f"[{phase}] L_rec={loss_recon.item():.4f} L_fit={loss_fit.item():.4f}"
+            )
+
+    denoiser.load_state_dict(best_state_dn)
+    recon_model.load_state_dict(best_state_rc)
+
+    return _extract_results(
+        denoiser, recon_model, coords_dt, coords_sos,
+        s_mean, s_std, loss_history, recon_losses, fit_losses,
     )
 
 
@@ -279,7 +452,7 @@ def _train_staged(
         d_pred = L @ s_phys
 
         res = (d_pred - d_denoised) * mask * time_scale
-        loss = (res ** 2).sum() / n_valid
+        loss = (res ** 2).sum() / n_valid + _compute_reg(s_norm, s_phys, config)
         loss.backward()
         opt_rc.step()
         sched_rc.step()
@@ -359,7 +532,7 @@ def _train_staged(
             loss_recon.item(), loss_fit.item(), lam_state,
         )
 
-        total_loss = loss_recon + lam * loss_fit
+        total_loss = loss_recon + lam * loss_fit + _compute_reg(s_norm, s_phys, config)
         total_loss.backward()
         opt_joint.step()
         sched_joint.step()

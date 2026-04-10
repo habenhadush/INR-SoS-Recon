@@ -47,6 +47,8 @@ import time
 from datetime import datetime
 from pathlib import Path
 
+import matplotlib
+matplotlib.use("Agg")
 import numpy as np
 import wandb
 
@@ -55,6 +57,8 @@ from inr_sos import DATA_DIR
 from inr_sos.utils.data import USDataset
 from inr_sos.utils.config import ExperimentConfig
 from inr_sos.evaluation.metrics import calculate_metrics
+from inr_sos.evaluation.sweep_indices import load_sweep_indices
+from inr_sos.visualization.report_figures import plot_metrics_comparison
 from scripts.run_sweep import load_dataset_config
 
 SCRIPTS_DIR   = Path(__file__).parent
@@ -181,6 +185,52 @@ def _aggregate(label, mae, rmse, ssim, cnr, n) -> dict:
         "CNR_std":   float(np.std(cnr)),
         "n_samples": n,
     }
+
+
+_DS_TITLES = {
+    "inverse_crime": "InverseCrime",
+    "kwave_geom":    "GeomSet",
+    "kwave_blob":    "BlobSet",
+    "kwave_arranged": "ArrangedSet",
+}
+
+
+def _emit_metrics_report(all_results: list, ds_key: str,
+                         out_dir: Path, mode: str, log) -> None:
+    """Emit plot_metrics_comparison to out_dir.
+
+    plot_method_grid is intentionally omitted: compare_baselines.py does not
+    retain per-sample s_phys arrays in any of its three modes.
+
+    The all_results list contains aggregate-only dicts (MAE_mean/std etc.).
+    We represent each method as a list of n_samples synthetic metric dicts,
+    one entry per sample, all carrying the same aggregate mean value.  This is
+    honest for the metrics plot (box plots collapse to a single dot per method)
+    but makes the spread visible only when per-sample data is available via the
+    `fresh_n` path.  The limitation is documented in the figure caption.
+    """
+    report_results: dict = {}
+    for r in all_results:
+        n = max(r.get("n_samples", 1), 1)
+        report_results[r["method"]] = [
+            {"metrics": {"MAE":  r["MAE_mean"],  "RMSE": r["RMSE_mean"],
+                         "SSIM": r["SSIM_mean"], "CNR":  r["CNR_mean"]},
+             "s_phys": None}
+            for _ in range(n)
+        ]
+
+    out_dir.mkdir(parents=True, exist_ok=True)
+    metrics_path = out_dir / f"report_metrics_{ds_key}_{mode}.svg"
+    try:
+        plot_metrics_comparison(
+            results=report_results,
+            save_path=metrics_path,
+            show=False,
+            png_fallback=True,
+        )
+        log.info(f"  Report metrics -> {metrics_path}")
+    except Exception as exc:
+        log.warning(f"  Report figure generation failed: {exc}")
 
 
 # INR fresh run
@@ -435,6 +485,19 @@ def main():
                     help="Human-readable name for this job (e.g. 'ic_warm_20samp'). "
                          "All W&B runs from this submission are grouped under this name. "
                          "If omitted, run_tag is used.")
+    parser.add_argument("--report_plots", action="store_true",
+                        help="Generate a thesis-quality metrics-comparison figure "
+                             "(SVG + PNG). Note: plot_method_grid is not available here "
+                             "because per-sample s_phys arrays are not retained.")
+    parser.add_argument("--no_exclude_sweep_samples", action="store_true",
+                        help="Do NOT exclude sweep indices from fresh sampling "
+                             "(default: sweep + validation indices are excluded). "
+                             "Has no effect in --use_registry or --embedded mode.")
+    parser.add_argument("--sweep_id_exclude", default=None, dest="sweep_id_exclude",
+                        help="Sweep ID prefix to use for index exclusion lookup "
+                             "(optional; defaults to --sweep_id). Pass a different "
+                             "value only if the exclusion sweep differs from the "
+                             "config sweep.")
     args = parser.parse_args()
     if not args.embedded:
         if not args.use_registry and args.fresh_n is None:
@@ -511,6 +574,10 @@ def main():
             log.info("\nLogging to W&B ...")
             log_to_wandb(all_results, entry, indices, mode, wb_group=wb_group)
 
+        if args.report_plots:
+            _emit_metrics_report(all_results, args.dataset or "embedded",
+                                 log_path.parent, mode, log)
+
         log.info(f"\n  Log: {log_path}")
         return
 
@@ -553,15 +620,28 @@ def main():
                  f"{rank4['method']} / {rank4['model_type']})")
 
     else:
-        used_indices = get_used_indices(entry)
-        log.info(f"Previously used indices: {len(used_indices)} — all excluded")
+        ds_cfg = load_dataset_config(args.dataset)
+
+        if args.no_exclude_sweep_samples:
+            used_indices: set = set()
+            log.info("Sweep-index exclusion disabled (--no_exclude_sweep_samples)")
+        else:
+            used_indices = get_used_indices(entry)
+            # Also pull any extra indices flagged via load_sweep_indices for this dataset
+            _excl_sweep_id = args.sweep_id_exclude or args.sweep_id
+            _extra = load_sweep_indices(
+                dataset_key=ds_cfg.get("key", ""),
+                sweep_id=_excl_sweep_id,
+                registry_path=REGISTRY_FILE,
+            )
+            used_indices |= _extra
+            log.info(f"Previously used indices: {len(used_indices)} — all excluded")
 
         rng     = np.random.default_rng(seed=2026)
         pool    = [i for i in range(10000) if i not in used_indices]
         indices = rng.choice(pool, size=args.fresh_n, replace=False).tolist()
         log.info(f"Fresh indices ({len(indices)}): {indices}")
 
-        ds_cfg = load_dataset_config(args.dataset)
         data_file  = ds_cfg["data_path"]
         grid_file = DATA_DIR + "/DL-based-SoS/forward_model_lr/grid_parameters.mat"
         log.info("Loading dataset for INR run ...")
@@ -592,6 +672,16 @@ def main():
     if not args.no_wandb:
         log.info("\nLogging to W&B ...")
         log_to_wandb(all_results, entry, indices, mode)
+
+    # ── Thesis-quality report figures (optional) ─────────────────────────
+    if args.report_plots:
+        # ds_cfg is only populated in --fresh_n and --embedded branches;
+        # fall back to args.dataset for --use_registry.
+        try:
+            _ds_key = ds_cfg.get("key", args.dataset or "unknown")
+        except NameError:
+            _ds_key = args.dataset or "unknown"
+        _emit_metrics_report(all_results, _ds_key, log_path.parent, mode, log)
 
     # ── Registry ──────────────────────────────────────────────────────────
     comparison_key = f"comparison_{mode}"

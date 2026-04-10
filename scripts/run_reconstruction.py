@@ -59,6 +59,10 @@ from inr_sos.training.engines import (
     optimize_sequential_views,
     optimize_stochastic_ray_batching,
 )
+from inr_sos.visualization.report_figures import (
+    plot_method_grid,
+    plot_metrics_comparison,
+)
 
 SCRIPTS_DIR   = Path(__file__).parent
 REGISTRY_FILE = SCRIPTS_DIR / "sweep_registry.json"
@@ -533,6 +537,11 @@ def main():
     parser.add_argument("--warm_init", action="store_true")
     parser.add_argument("--top_k_per_model", default=None, type=int)
     parser.add_argument("--job_name", default=None)
+    parser.add_argument("--report_plots", action="store_true",
+                        help="Generate thesis-quality comparison figures (SVG + PNG).")
+    parser.add_argument("--no_exclude_sweep_samples", action="store_true",
+                        help="Do NOT exclude sweep indices from the evaluation pool "
+                             "(default: sweep + validation indices are excluded).")
 
     args = parser.parse_args()
 
@@ -579,8 +588,12 @@ def main():
     if args.indices:
         indices = args.indices
     else:
-        used = get_used_indices(entry)
-        log.info(f"Previously used: {len(used)} indices — excluded")
+        if args.no_exclude_sweep_samples:
+            used = set()
+            log.info("Sweep-index exclusion disabled (--no_exclude_sweep_samples)")
+        else:
+            used = get_used_indices(entry)
+            log.info(f"Previously used: {len(used)} indices — excluded")
         rng  = np.random.default_rng(seed=3141)
         pool = [i for i in range(len(dataset)) if i not in used]
         if n_samples > len(pool):
@@ -681,6 +694,60 @@ def main():
         log_wandb_summary(all_results, entry, indices, run_tag,
                           args.sweep_id, log, has_gt=has_gt,
                           wb_group=wb_group, plot_dir=plot_dir)
+
+    # ── Thesis-quality report figures (optional) ─────────────────────────
+    if args.report_plots and has_gt:
+        log.info("\n  Generating report figures ...")
+        # Build {label: [{"metrics": ..., "s_phys": ...}]} from per_sample lists
+        report_results: dict = {}
+        for result in all_results:
+            label = result["method"]
+            report_results[label] = [
+                {
+                    "metrics": {k: entry[k] for k in ("MAE", "RMSE", "SSIM", "CNR")
+                                if k in entry},
+                    "s_phys": entry["s_phys_np"],
+                }
+                for entry in result["per_sample"]
+                if entry.get("s_gt_np") is not None
+            ]
+        # Add L1/L2 baselines if present in dataset
+        samples_loaded = [dataset[idx] for idx in indices]
+        for key, label in [("s_l1_recon", "L1"), ("s_l2_recon", "L2")]:
+            if key in samples_loaded[0]:
+                from inr_sos.evaluation.metrics import calculate_metrics as _calc
+                report_results[label] = [
+                    {"metrics": _calc(s[key], s["s_gt_raw"]), "s_phys": s[key]}
+                    for s in samples_loaded
+                ]
+        ds_titles = {
+            "kwave_geom": "GeomSet",
+            "kwave_blob": "BlobSet",
+            "inverse_crime": "InverseCrime",
+        }
+        try:
+            grid_path_svg = plot_dir / f"{run_tag}_report_comparison.svg"
+            metrics_path_svg = plot_dir / f"{run_tag}_report_metrics.svg"
+            plot_method_grid(
+                results=report_results,
+                samples=samples_loaded,
+                save_path=grid_path_svg,
+                dataset_title=ds_titles.get(ds_cfg["key"], ds_cfg["key"]),
+                show=False,
+                png_fallback=True,
+            )
+            plot_metrics_comparison(
+                results=report_results,
+                save_path=metrics_path_svg,
+                show=False,
+                png_fallback=True,
+            )
+            log.info(f"  Report grid    -> {grid_path_svg}")
+            log.info(f"  Report metrics -> {metrics_path_svg}")
+        except Exception as exc:
+            log.warning(f"  Report figure generation failed: {exc}")
+    elif args.report_plots and not has_gt:
+        log.warning("  --report_plots requires ground truth — skipping (no GT in dataset)")
 
     # ── Registry ──────────────────────────────────────────────────────────
     slim_results = [{k: v for k, v in r.items() if k != "per_sample"}

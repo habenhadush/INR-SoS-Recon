@@ -58,19 +58,27 @@ datasets:
       n_eval_samples: 5
       time_scale: "auto"
       parameters:
-        # Denoiser
+        # Denoiser architecture
+        dn_model_type: {values: ["FourierMLP", "SirenMLP"]}
         dn_scale: {distribution: "log_uniform_values", min: 0.5, max: 20.0}
+        dn_omega: {distribution: "log_uniform_values", min: 10.0, max: 60.0}
         dn_hidden_features: {values: [64, 128, 256]}
         dn_hidden_layers: {values: [2, 3]}
-        # Reconstructor
+        # Reconstructor architecture
+        rc_model_type: {values: ["ReluMLP", "FourierMLP", "SirenMLP", "GeluMLP"]}
         rc_hidden_features: {values: [128, 256, 512]}
         rc_hidden_layers: {values: [2, 3, 4]}
         rc_lr: {distribution: "log_uniform_values", min: 1e-5, max: 1e-3}
         rc_mapping_size: {values: [32, 64, 128]}
+        rc_scale: {distribution: "log_uniform_values", min: 0.5, max: 10.0}
+        rc_omega: {distribution: "log_uniform_values", min: 10.0, max: 60.0}
+        # Regularization (0 = off)
+        rc_tv_weight: {values: [0, 0.0001, 0.001, 0.01, 0.1]}
+        rc_reg_weight: {values: [0, 0.0001, 0.001, 0.01]}
         # Training schedule
-        pretrain_dn_steps: {values: [200, 300, 500]}
+        pretrain_dn_steps: {values: [200, 300, 500, 800, 1000]}
         pretrain_rc_steps: {values: [300, 500, 800]}
-        joint_steps: {values: [1000, 2000, 3000]}
+        joint_steps: {values: [1000, 2000, 3000, 5000]}
         joint_lr_factor: {distribution: "log_uniform_values", min: 0.01, max: 0.5}
         # Lambda strategy
         lambda_strategy: {values: ["fixed", "cosine", "balanced", "residual"]}
@@ -115,19 +123,27 @@ datasets:
       n_eval_samples: 5
       time_scale: "auto"
       parameters:
-        # Denoiser
+        # Denoiser architecture
+        dn_model_type: {values: ["FourierMLP", "SirenMLP"]}
         dn_scale: {distribution: "log_uniform_values", min: 0.5, max: 20.0}
+        dn_omega: {distribution: "log_uniform_values", min: 10.0, max: 60.0}
         dn_hidden_features: {values: [64, 128, 256]}
         dn_hidden_layers: {values: [2, 3]}
-        # Reconstructor
+        # Reconstructor architecture
+        rc_model_type: {values: ["ReluMLP", "FourierMLP", "SirenMLP", "GeluMLP"]}
         rc_hidden_features: {values: [128, 256, 512]}
         rc_hidden_layers: {values: [2, 3, 4]}
         rc_lr: {distribution: "log_uniform_values", min: 1e-5, max: 1e-3}
         rc_mapping_size: {values: [32, 64, 128]}
+        rc_scale: {distribution: "log_uniform_values", min: 0.5, max: 10.0}
+        rc_omega: {distribution: "log_uniform_values", min: 10.0, max: 60.0}
+        # Regularization (0 = off)
+        rc_tv_weight: {values: [0, 0.0001, 0.001, 0.01, 0.1]}
+        rc_reg_weight: {values: [0, 0.0001, 0.001, 0.01]}
         # Training schedule
-        pretrain_dn_steps: {values: [200, 300, 500]}
+        pretrain_dn_steps: {values: [200, 300, 500, 800, 1000]}
         pretrain_rc_steps: {values: [300, 500, 800]}
-        joint_steps: {values: [1000, 2000, 3000]}
+        joint_steps: {values: [1000, 2000, 3000, 5000]}
         joint_lr_factor: {distribution: "log_uniform_values", min: 0.01, max: 0.5}
         # Lambda strategy
         lambda_strategy: {values: ["fixed", "cosine", "balanced", "residual"]}
@@ -152,10 +168,6 @@ datasets:
     #   ground_truth: "imgs_gt"
     #   nan_mask: "nanidx"
 
-  # ── Denoised datasets ──────────────────────────────────────────────────
-  # U-Net and Diffusion denoised versions of kwave_geom and kwave_blob.
-  # Same transducer geometry → same A.mat and pix2time.
-  # Use compare_topk with existing kwave_geom/kwave_blob sweep configs first.
 
   kwave_geom_unet:
     name: "k-Wave Geometry — U-Net Denoised"
@@ -282,3 +294,11 @@ datasets:
         epochs: [100, 150, 200]
         batch_size: [2048, 4096, 8192]
         time_scale: [1e6, 2e7]
+
+  phantom:
+    name: "description"
+    data_file: "/DL-based-SoS/test_PhantomData.mat"
+  
+  breast_data:
+    name: "description"
+    data_file: "/DL-based-SoS/test_BreastData.mat"

@@ -45,6 +45,10 @@ from inr_sos.training.denoise_engine import (
     denoise_measurements,
     DEFAULT_DENOISE_CFG,
 )
+from inr_sos.visualization.report_figures import (
+    plot_method_grid,
+    plot_metrics_comparison,
+)
 
 SCRIPTS_DIR = Path(__file__).parent
 OUTPUT_DIR = SCRIPTS_DIR / "data" / "denoiser_experiment"
@@ -370,6 +374,8 @@ def main():
     parser.add_argument("--denoise_steps", type=int, default=500)
     parser.add_argument("--denoise_lr", type=float, default=1e-3)
     parser.add_argument("--no_wandb", action="store_true")
+    parser.add_argument("--report_plots", action="store_true",
+                        help="Generate thesis-quality comparison figures (SVG + PNG).")
     args = parser.parse_args()
 
     # ── Setup ─────────────────────────────────────────────────────────────
@@ -425,6 +431,11 @@ def main():
 
     # ── Run experiment ────────────────────────────────────────────────────
     recon_cfg = make_recon_config()
+    if hasattr(dataset, "pix2time") and dataset.pix2time is not None:
+        recon_cfg.time_scale = 1.0 / dataset.pix2time
+    elif ds_cfg.get("pix2time") is not None:
+        recon_cfg.time_scale = 1.0 / float(ds_cfg["pix2time"])
+        log.info(f"  time_scale from yaml pix2time: {recon_cfg.time_scale:.4e}")
     all_results = []
 
     for i, idx in enumerate(indices):
@@ -476,6 +487,48 @@ def main():
     log.info(f"    Raw:      {np.mean(raw_oracle):.2e} ± {np.std(raw_oracle):.2e}")
     log.info(f"    Denoised: {np.mean(dn_oracle):.2e} ± {np.std(dn_oracle):.2e}")
     log.info(f"{'='*80}")
+
+    # ── Thesis-quality report figures (optional) ─────────────────────────
+    if args.report_plots:
+        log.info("\n  Generating report figures ...")
+        # Restructure: {method: [per_sample_results]} for report_figures API
+        samples = [dataset[idx] for idx in indices]
+        report_results = {}
+        for cond, label in [("l1", "L1"), ("l2", "L2"),
+                            ("raw", "Raw INR"), ("denoised", "Denoised INR")]:
+            if cond not in all_results[0]:
+                continue
+            report_results[label] = [
+                {"metrics": r[cond]["metrics"], "s_phys": r[cond]["s_phys"]}
+                for r in all_results
+            ]
+
+        ds_titles = {
+            "kwave_geom": "GeomSet",
+            "kwave_blob": "BlobSet",
+            "inverse_crime": "InverseCrime",
+        }
+        try:
+            grid_path_svg = run_dir / "report_comparison.svg"
+            metrics_path_svg = run_dir / "report_metrics.svg"
+            plot_method_grid(
+                results=report_results,
+                samples=samples,
+                save_path=grid_path_svg,
+                dataset_title=ds_titles.get(args.dataset, args.dataset),
+                show=False,
+                png_fallback=True,
+            )
+            plot_metrics_comparison(
+                results=report_results,
+                save_path=metrics_path_svg,
+                show=False,
+                png_fallback=True,
+            )
+            log.info(f"  Report grid    -> {grid_path_svg}")
+            log.info(f"  Report metrics -> {metrics_path_svg}")
+        except Exception as exc:
+            log.warning(f"  Report figure generation failed: {exc}")
 
     # ── Save results ──────────────────────────────────────────────────────
     results_json = {

@@ -43,6 +43,7 @@ from inr_sos import DATA_DIR
 from inr_sos.utils.data import USDataset
 from inr_sos.utils.config import ExperimentConfig
 from inr_sos.evaluation.metrics import calculate_metrics
+from inr_sos.evaluation.sweep_indices import load_sweep_indices
 from inr_sos.models.mlp import ReluMLP
 from inr_sos.training.engines import optimize_full_forward_operator
 from inr_sos.training.denoise_engine import DEFAULT_DENOISE_CFG
@@ -251,6 +252,19 @@ def main():
         action="store_true",
         help="Generate thesis-quality comparison figures (SVG + PNG) after the run.",
     )
+    parser.add_argument(
+        "--no_exclude_sweep_samples",
+        action="store_true",
+        help="Do NOT exclude sweep indices from the evaluation pool "
+             "(default: sweep + validation indices are excluded).",
+    )
+    parser.add_argument(
+        "--sweep_id",
+        default=None,
+        help="Sweep ID prefix to look up in sweep_registry.json when excluding "
+             "sweep samples (optional; if omitted the most recent entry for "
+             "--dataset is used).",
+    )
     args = parser.parse_args()
 
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -300,8 +314,20 @@ def main():
     if args.indices:
         indices = args.indices
     else:
+        if args.no_exclude_sweep_samples:
+            sweep_used: set[int] = set()
+            log.info("  Sweep-index exclusion disabled (--no_exclude_sweep_samples)")
+        else:
+            sweep_used = load_sweep_indices(
+                dataset_key=args.dataset,
+                sweep_id=args.sweep_id,
+                registry_path=SCRIPTS_DIR / "sweep_registry.json",
+            )
+            if sweep_used:
+                log.info(f"  Excluding {len(sweep_used)} sweep indices from pool")
         n = args.n_samples if args.n_samples is not None else len(dataset)
-        indices = list(range(min(n, len(dataset))))
+        pool = [i for i in range(len(dataset)) if i not in sweep_used]
+        indices = pool[: min(n, len(pool))]
     log.info(f"  Samples: {indices}")
 
     recon_cfg = make_recon_config()

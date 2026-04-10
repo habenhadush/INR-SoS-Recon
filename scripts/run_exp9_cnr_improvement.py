@@ -41,8 +41,13 @@ from inr_sos import DATA_DIR
 from inr_sos.utils.data import USDataset
 from inr_sos.utils.config import ExperimentConfig
 from inr_sos.evaluation.metrics import calculate_metrics
+from inr_sos.evaluation.sweep_indices import load_sweep_indices
 from inr_sos.models.mlp import ReluMLP
 from inr_sos.training.engines import optimize_full_forward_operator
+from inr_sos.visualization.report_figures import (
+    plot_method_grid,
+    plot_metrics_comparison,
+)
 
 SCRIPTS_DIR = Path(__file__).parent
 OUTPUT_DIR = SCRIPTS_DIR / "data" / "experiment9_cnr"
@@ -340,6 +345,21 @@ def main():
     parser.add_argument("--no_wandb", action="store_true")
     parser.add_argument("--n_vis", type=int, default=3,
                         help="Number of samples to visualize")
+    parser.add_argument("--report_plots", action="store_true",
+                        help="Generate thesis-quality comparison figures (SVG + PNG).")
+    parser.add_argument(
+        "--no_exclude_sweep_samples",
+        action="store_true",
+        help="Do NOT exclude sweep indices from the evaluation pool "
+             "(default: sweep + validation indices are excluded).",
+    )
+    parser.add_argument(
+        "--sweep_id",
+        default=None,
+        help="Sweep ID prefix to look up in sweep_registry.json when excluding "
+             "sweep samples (optional; if omitted the most recent entry for "
+             "--dataset is used).",
+    )
     args = parser.parse_args()
 
     # ── Setup ─────────────────────────────────────────────────────────────
@@ -377,8 +397,20 @@ def main():
     if args.indices:
         indices = args.indices
     else:
+        if args.no_exclude_sweep_samples:
+            sweep_used: set[int] = set()
+            log.info("  Sweep-index exclusion disabled (--no_exclude_sweep_samples)")
+        else:
+            sweep_used = load_sweep_indices(
+                dataset_key=args.dataset,
+                sweep_id=args.sweep_id,
+                registry_path=SCRIPTS_DIR / "sweep_registry.json",
+            )
+            if sweep_used:
+                log.info(f"  Excluding {len(sweep_used)} sweep indices from pool")
         n = args.n_samples if args.n_samples is not None else len(dataset)
-        indices = list(range(min(n, len(dataset))))
+        pool = [i for i in range(len(dataset)) if i not in sweep_used]
+        indices = pool[: min(n, len(pool))]
     log.info(f"  Using {len(indices)} samples: {indices}")
 
     # ── Baselines ─────────────────────────────────────────────────────────
@@ -522,6 +554,67 @@ def main():
                 wandb.log({f"sample_{idx}": wandb.Image(str(fp))})
 
         wandb.finish()
+
+    # ── Thesis-quality report figures (optional) ─────────────────────────
+    if args.report_plots:
+        log.info("\n  Generating report figures ...")
+        # Build report_results: {method_label: [{"metrics": ..., "s_phys": ...}]}
+        report_results: dict = {}
+        samples_list = [dataset[idx] for idx in indices]
+
+        for name in ["L1", "L2"]:
+            key = f"s_{name.lower()}_recon"
+            if key in samples_list[0]:
+                report_results[name] = [
+                    {"metrics": calculate_metrics(s[key], s["s_gt_raw"]),
+                     "s_phys": s[key]}
+                    for s in samples_list
+                ]
+
+        for r in tv_results:
+            tv = r["tv_weight"]
+            label = "INR (no TV)" if tv == 0 else f"INR (tv={tv:.0e})"
+            per_sample_list = []
+            for entry_m in r["per_sample"]:
+                idx_val = entry_m["idx"]
+                recon_entry = next(
+                    (e for e in r["reconstructions"] if e["idx"] == idx_val), None
+                )
+                if recon_entry is None:
+                    continue
+                per_sample_list.append({
+                    "metrics": {k: entry_m[k] for k in ("MAE", "RMSE", "SSIM", "CNR")},
+                    "s_phys": recon_entry["s_phys"],
+                })
+            if per_sample_list:
+                report_results[label] = per_sample_list
+
+        ds_titles = {
+            "kwave_geom": "GeomSet",
+            "kwave_blob": "BlobSet",
+            "inverse_crime": "InverseCrime",
+        }
+        try:
+            grid_path_svg = run_dir / "report_comparison.svg"
+            metrics_path_svg = run_dir / "report_metrics.svg"
+            plot_method_grid(
+                results=report_results,
+                samples=samples_list,
+                save_path=grid_path_svg,
+                dataset_title=ds_titles.get(args.dataset, args.dataset),
+                show=False,
+                png_fallback=True,
+            )
+            plot_metrics_comparison(
+                results=report_results,
+                save_path=metrics_path_svg,
+                show=False,
+                png_fallback=True,
+            )
+            log.info(f"  Report grid    -> {grid_path_svg}")
+            log.info(f"  Report metrics -> {metrics_path_svg}")
+        except Exception as exc:
+            log.warning(f"  Report figure generation failed: {exc}")
 
     log.info(f"\n  Experiment 9 complete. All outputs in {run_dir}")
 

@@ -27,10 +27,17 @@ import inr_sos
 from datetime import datetime
 from pathlib import Path
 
+import matplotlib
+matplotlib.use("Agg")
+
 from inr_sos import DATA_DIR
 from inr_sos.utils.data import USDataset
 from inr_sos.utils.config import ExperimentConfig
 from inr_sos.evaluation.pipeline import run_grid_comparison
+from inr_sos.visualization.report_figures import (
+    plot_method_grid,
+    plot_metrics_comparison,
+)
 
 SCRIPTS_DIR   = Path(__file__).parent
 REGISTRY_FILE = SCRIPTS_DIR / "sweep_registry.json"
@@ -136,6 +143,14 @@ def main():
     parser.add_argument("--holdout_indices",  nargs="+",  type=int, default=None,
                         help="Explicit holdout indices (overrides --n_holdout)")
     parser.add_argument("--no_wandb",         action="store_true")
+    parser.add_argument("--report_plots",     action="store_true",
+                        help="Generate thesis-quality comparison figures (SVG + PNG).")
+    parser.add_argument(
+        "--no_exclude_sweep_samples",
+        action="store_true",
+        help="Do NOT exclude sweep indices from the holdout pool "
+             "(default: sweep indices are always excluded).",
+    )
     args = parser.parse_args()
 
     log_path = setup_logging(args.sweep_id)
@@ -156,17 +171,23 @@ def main():
     # ── Holdout indices — must be disjoint from sweep indices ─────────────
     if args.holdout_indices:
         holdout = args.holdout_indices
-        overlap = set(holdout) & sweep_indices
-        if overlap:
-            raise ValueError(
-                f"Holdout indices overlap with sweep indices: {overlap}. "
-                f"Choose different samples."
-            )
+        if not args.no_exclude_sweep_samples:
+            overlap = set(holdout) & sweep_indices
+            if overlap:
+                raise ValueError(
+                    f"Holdout indices overlap with sweep indices: {overlap}. "
+                    f"Choose different samples or pass --no_exclude_sweep_samples."
+                )
     else:
-        log.info(f"Sweep used indices: {sorted(sweep_indices)}")
+        if args.no_exclude_sweep_samples:
+            effective_excluded: set[int] = set()
+            log.info("Sweep-index exclusion disabled (--no_exclude_sweep_samples)")
+        else:
+            effective_excluded = sweep_indices
+            log.info(f"Sweep used indices: {sorted(effective_excluded)}")
         log.info(f"Sampling {args.n_holdout} disjoint holdout indices ...")
         rng = np.random.default_rng(seed=99)   # fixed seed for reproducibility
-        pool = [i for i in range(10000) if i not in sweep_indices]
+        pool = [i for i in range(10000) if i not in effective_excluded]
         holdout = rng.choice(pool, size=args.n_holdout, replace=False).tolist()
 
     log.info(f"Holdout indices ({len(holdout)}): {holdout}")
@@ -302,6 +323,78 @@ def main():
              f"{best_holdout['holdout_RMSE_std']:.3f}")
     log.info(f"  CNR  {best_holdout['holdout_CNR_mean']:.3f} ± "
              f"{best_holdout['holdout_CNR_std']:.3f}")
+
+    # ── Thesis-quality report figures (optional) ─────────────────────────
+    if args.report_plots:
+        log.info("\n  Generating report figures ...")
+        # run_grid_comparison returns {(method, model): {"MAE": [...], ...}}.
+        # We have per-rank validation_results with aggregate metrics; build
+        # report_results from them for plot_metrics_comparison.
+        # Note: plot_method_grid requires per-sample s_phys which run_best.py
+        # does not retain — only metrics comparison is produced here.
+        import yaml
+        cfg_path = SCRIPTS_DIR / "datasets.yaml"
+        try:
+            with open(cfg_path) as _f:
+                _all_ds = yaml.safe_load(_f)["datasets"]
+            # Infer dataset from registry entry
+            _ds_key = entry.get("dataset", "kwave_geom")
+        except Exception:
+            _ds_key = "kwave_geom"
+
+        report_results: dict = {}
+
+        # L1 / L2 from dataset (load minimal subset)
+        try:
+            from inr_sos import DATA_DIR as _DATA_DIR
+            _ds_cfg = _all_ds[_ds_key]
+            _data_path = _DATA_DIR + _ds_cfg["data_file"]
+            _grid_path = _DATA_DIR + "/DL-based-SoS/forward_model_lr/grid_parameters.mat"
+            from inr_sos.utils.data import USDataset as _USD
+            from inr_sos.evaluation.metrics import calculate_metrics as _calc
+            _ds = _USD(_data_path, _grid_path)
+            for _key, _label in [("s_l1_recon", "L1"), ("s_l2_recon", "L2")]:
+                _s0 = _ds[holdout[0]]
+                if _key in _s0:
+                    report_results[_label] = [
+                        {"metrics": _calc(_ds[_i][_key], _ds[_i]["s_gt_raw"]),
+                         "s_phys": _ds[_i][_key]}
+                        for _i in holdout
+                    ]
+        except Exception as _exc:
+            log.warning(f"  Could not load baselines for report: {_exc}")
+
+        # INR validation results: build per-sample metric dicts from aggregate
+        for r in validation_results:
+            _label = f"{r['method']}/{r['model_type']} rank#{r['rank']}"
+            # Expand holdout-level aggregate into synthetic per-sample list
+            # (we only have summary stats, not individual values)
+            _n = len(holdout)
+            _mae_mean = r["holdout_MAE_mean"]
+            _cnr_mean = r["holdout_CNR_mean"]
+            _rmse_mean = r["holdout_RMSE_mean"]
+            _ssim_mean = r["holdout_SSIM_mean"]
+            # Represent as single aggregate entry (not ideal but honest)
+            report_results[_label] = [
+                {"metrics": {"MAE": _mae_mean, "RMSE": _rmse_mean,
+                             "SSIM": _ssim_mean, "CNR": _cnr_mean},
+                 "s_phys": None}
+                for _ in range(_n)
+            ]
+
+        out_dir = LOG_DIR / f"report_{args.sweep_id}"
+        out_dir.mkdir(parents=True, exist_ok=True)
+        metrics_path_svg = out_dir / "report_metrics.svg"
+        try:
+            plot_metrics_comparison(
+                results=report_results,
+                save_path=metrics_path_svg,
+                show=False,
+                png_fallback=True,
+            )
+            log.info(f"  Report metrics -> {metrics_path_svg}")
+        except Exception as exc:
+            log.warning(f"  Report figure generation failed: {exc}")
 
     # ── Update registry ───────────────────────────────────────────────────
     for e in registry:

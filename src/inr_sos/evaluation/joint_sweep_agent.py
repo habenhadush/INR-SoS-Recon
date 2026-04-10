@@ -28,10 +28,18 @@ from inr_sos.evaluation.sweep_agent import (
     _load_dataset_sweep_config,
     _yaml_param_to_wandb,
 )
-from inr_sos.models.mlp import ReluMLP
+from inr_sos.models.mlp import ReluMLP, FourierMLP, GeluMLP
+from inr_sos.models.siren import SirenMLP
 from inr_sos.training.denoise_engine import DEFAULT_DENOISE_CFG
 from inr_sos.training.joint_engine import optimize_joint
 from inr_sos.utils.config import ExperimentConfig
+
+_RECON_MODEL_MAP = {
+    "ReluMLP": ReluMLP,
+    "FourierMLP": FourierMLP,
+    "GeluMLP": GeluMLP,
+    "SirenMLP": SirenMLP,
+}
 
 _log = logging.getLogger(__name__)
 
@@ -130,17 +138,21 @@ def run_joint_sweep_agent(
 
         # ── Denoiser config ──────────────────────────────────────────────
         denoise_cfg = dict(DEFAULT_DENOISE_CFG)
+        denoise_cfg["model_type"] = _sc_get(sc, "dn_model_type",
+                                             denoise_cfg.get("model_type", "FourierMLP"), str)
         denoise_cfg["scale"] = _sc_get(sc, "dn_scale", denoise_cfg["scale"], float)
+        denoise_cfg["omega"] = _sc_get(sc, "dn_omega", denoise_cfg.get("omega", 15.0), float)
         denoise_cfg["hidden_features"] = _sc_get(sc, "dn_hidden_features",
                                                   denoise_cfg["hidden_features"], int)
         denoise_cfg["hidden_layers"] = _sc_get(sc, "dn_hidden_layers",
                                                 denoise_cfg["hidden_layers"], int)
 
         # ── Reconstructor config ─────────────────────────────────────────
+        rc_model_type = _sc_get(sc, "rc_model_type", "ReluMLP", str)
         recon_cfg = ExperimentConfig(
             project_name="INR-SoS-Recon",
             experiment_group="Joint-Sweep",
-            model_type="ReluMLP",
+            model_type=rc_model_type,
             hidden_features=_sc_get(sc, "rc_hidden_features", 256, int),
             hidden_layers=_sc_get(sc, "rc_hidden_layers", 3, int),
             mapping_size=_sc_get(sc, "rc_mapping_size", 64, int),
@@ -151,6 +163,8 @@ def run_joint_sweep_agent(
             clamp_slowness=True,
             loss_type="mse",
             time_scale=base_time_scale,
+            tv_weight=_sc_get(sc, "rc_tv_weight", 0.0, float),
+            reg_weight=_sc_get(sc, "rc_reg_weight", 0.0, float),
         )
 
         # ── Training schedule ────────────────────────────────────────────
@@ -180,12 +194,18 @@ def run_joint_sweep_agent(
         for sample_num, idx in enumerate(target_indices):
             sample = dataset[idx]
 
-            model = ReluMLP(
+            model_cls = _RECON_MODEL_MAP[rc_model_type]
+            model_kwargs = dict(
                 in_features=recon_cfg.in_features,
                 hidden_features=recon_cfg.hidden_features,
                 hidden_layers=recon_cfg.hidden_layers,
                 mapping_size=recon_cfg.mapping_size,
             )
+            if rc_model_type == "FourierMLP":
+                model_kwargs["scale"] = _sc_get(sc, "rc_scale", 10.0, float)
+            elif rc_model_type == "SirenMLP":
+                model_kwargs["omega"] = _sc_get(sc, "rc_omega", 30.0, float)
+            model = model_cls(**model_kwargs)
 
             result = optimize_joint(
                 sample=sample,

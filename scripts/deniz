@@ -32,3 +32,20 @@ Please let me know if there is anything I need to explore in this regard.
 
 
 
+The residual-normalized λ strategy sets λ per-sample automatically based on the reconstruction residuals measured
+    after Stage 2 (reconctruction only) pretraining:
+
+    1. After Stage 2 completes, compute:
+      - r₀ = L_recon (how well the reconstruction fits the denoised data)
+      - f₀ = L_fit (how far the denoised data has drifted from raw)
+    2. Set λ for that sample:
+
+    2. λ_sample = α × (r₀ / f₀)
+
+    The intuition:
+    - If r₀ >> f₀: lots of mismatch remains but the denoiser hasn't moved much → low λ → give the denoiser more freedom
+     to correct
+    - If r₀ ≈ f₀: things are balanced → moderate λ
+
+The single hyperparameter α is a global scaling factor. The key advantage ->  it's automatically per-sample — different samples with different mismatch levels get different λ
+values, which addresses the problem I mentioned above where fixed λ=0.07 works for one sample but not another. (Attached the comprasion and metric plots on randmoy selected geom dataset samples)

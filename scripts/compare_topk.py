@@ -50,6 +50,11 @@ from inr_sos import DATA_DIR
 from inr_sos.utils.data import USDataset
 from inr_sos.utils.config import ExperimentConfig
 from inr_sos.evaluation.metrics import calculate_metrics
+from inr_sos.evaluation.sweep_indices import load_sweep_indices
+from inr_sos.visualization.report_figures import (
+    plot_method_grid,
+    plot_metrics_comparison,
+)
 
 SCRIPTS_DIR   = Path(__file__).parent
 REGISTRY_FILE = SCRIPTS_DIR / "sweep_registry.json"
@@ -880,7 +885,12 @@ def main():
                     help="Human-readable name for this job (e.g. 'ic_warm_20samp'). "
                          "All W&B runs from this submission are grouped under this name. "
                          "If omitted, run_tag is used.")
- 
+    parser.add_argument("--report_plots", action="store_true",
+                        help="Generate thesis-quality comparison figures (SVG + PNG).")
+    parser.add_argument("--no_exclude_sweep_samples", action="store_true",
+                        help="Do NOT exclude sweep indices from the evaluation pool "
+                             "(default: sweep + validation + comparison indices are excluded).")
+
     args = parser.parse_args()
 
     # ── Load dataset FIRST (needed for n_samples resolution) ──────────────
@@ -918,8 +928,12 @@ def main():
     registry, entry = load_registry(args.sweep_id)
 
     # ── Fresh indices ─────────────────────────────────────────────────────
-    used    = get_used_indices(entry)
-    log.info(f"Previously used: {len(used)} indices — excluded")
+    if args.no_exclude_sweep_samples:
+        used = set()
+        log.info("Sweep-index exclusion disabled (--no_exclude_sweep_samples)")
+    else:
+        used = get_used_indices(entry)
+        log.info(f"Previously used: {len(used)} indices — excluded")
     rng     = np.random.default_rng(seed=3141)
     pool    = [i for i in range(len(dataset)) if i not in used]
     if n_samples > len(pool):
@@ -1042,6 +1056,60 @@ def main():
         plt.close(fig_grid)
 
         save_per_sample_plots(all_results, out_dir, run_tag, log)
+
+    # ── Thesis-quality report figures (optional) ─────────────────────────
+    if args.report_plots:
+        log.info("\n  Generating report figures ...")
+        ds_titles = {
+            "inverse_crime": "InverseCrime",
+            "kwave_geom":    "GeomSet",
+            "kwave_blob":    "BlobSet",
+            "kwave_arranged": "ArrangedSet",
+        }
+        # Build {label: [{"metrics": {...}, "s_phys": array}]}
+        # per_sample dicts in compare_topk store MAE/RMSE/SSIM/CNR flat + s_phys_np
+        report_results: dict = {}
+        for r in all_results:
+            report_results[r["method"]] = [
+                {
+                    "metrics": {k: ps[k] for k in ("MAE", "RMSE", "SSIM", "CNR")
+                                if k in ps},
+                    "s_phys":  ps["s_phys_np"],
+                }
+                for ps in r["per_sample"]
+            ]
+
+        # Build synthetic sample objects (plot_method_grid needs "s_gt_raw" per sample)
+        # All per_sample entries share the same ordered indices — use first result's list
+        # to recover s_gt_np in index order.
+        _first_ps = all_results[0]["per_sample"]
+        import torch as _torch
+        report_samples = [
+            {"s_gt_raw": _torch.from_numpy(ps["s_gt_np"])}
+            for ps in _first_ps
+        ]
+
+        try:
+            grid_path_svg    = out_dir / f"{run_tag}_report_comparison.svg"
+            metrics_path_svg = out_dir / f"{run_tag}_report_metrics.svg"
+            plot_method_grid(
+                results=report_results,
+                samples=report_samples,
+                save_path=grid_path_svg,
+                dataset_title=ds_titles.get(ds_cfg["key"], ds_cfg["key"]),
+                show=False,
+                png_fallback=True,
+            )
+            plot_metrics_comparison(
+                results=report_results,
+                save_path=metrics_path_svg,
+                show=False,
+                png_fallback=True,
+            )
+            log.info(f"  Report grid    -> {grid_path_svg}")
+            log.info(f"  Report metrics -> {metrics_path_svg}")
+        except Exception as exc:
+            log.warning(f"  Report figure generation failed: {exc}")
 
     # ── Registry ──────────────────────────────────────────────────────────
     slim_results = [{k: v for k, v in r.items() if k != "per_sample"}
