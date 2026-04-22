@@ -79,12 +79,15 @@ def _yaml_param_to_wandb(value) -> dict:
 
     - list  → {"values": [...]}  (with numeric coercion)
     - dict with 'distribution' → pass through (with numeric coercion on min/max)
+    - dict with 'values' → {"values": [...]}  (already W&B format, coerce values)
     - scalar → {"value": x}  (fixed, not swept)
     """
     if isinstance(value, list):
         return {"values": [_coerce_numeric(v) for v in value]}
     elif isinstance(value, dict) and "distribution" in value:
         return {k: _coerce_numeric(v) for k, v in value.items()}
+    elif isinstance(value, dict) and "values" in value:
+        return {"values": [_coerce_numeric(v) for v in value["values"]]}
     else:
         return {"value": _coerce_numeric(value)}
 

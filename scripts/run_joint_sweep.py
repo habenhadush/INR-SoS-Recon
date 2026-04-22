@@ -64,8 +64,17 @@ def main():
     parser.add_argument("--dataset", default=None,
                         help="Dataset key (default: uses 'active' field)")
     parser.add_argument("--n_runs", default=150, type=int)
+    parser.add_argument("--n_samples", type=int, default=None,
+                        help="Number of random eval samples (overrides YAML n_eval_samples)")
     parser.add_argument("--indices", nargs="+", type=int, default=None)
     parser.add_argument("--project", default="INR-SoS-Recon")
+    parser.add_argument("--roi_weight", type=float, default=0.7,
+                        help="Blend for MAE_composite: 1.0=pure MAE_roi, "
+                             "0.7=70%% MAE_roi + 30%% MAE_mean, 0.0=pure MAE_mean")
+    parser.add_argument("--contrast_weight", type=float, default=0.0,
+                        help="Contrast penalty: 0.0=none, 1.0=doubles objective when CR=0")
+    parser.add_argument("--selection_metric", default="loss", choices=["loss", "mae_roi"],
+                        help="Model checkpoint criterion in Stage 3 (default: loss)")
     args = parser.parse_args()
 
     log_path = setup_logging(args.sweep_id)
@@ -131,11 +140,21 @@ def main():
         indices = args.indices
     else:
         np.random.seed(42)
-        n = min(n_eval_samples, len(dataset))
+        n = args.n_samples if args.n_samples is not None else n_eval_samples
+        n = min(n, len(dataset))
         indices = np.random.choice(len(dataset), size=n, replace=False).tolist()
 
     log.info(f"  Eval samples: {len(indices)} indices = {indices}")
-    update_registry(args.sweep_id, {"indices": indices, "dataset": dataset_key})
+    log.info(f"  roi_weight       : {args.roi_weight}")
+    log.info(f"  contrast_weight  : {args.contrast_weight}")
+    log.info(f"  selection_metric : {args.selection_metric}")
+    update_registry(args.sweep_id, {
+        "indices": indices,
+        "dataset": dataset_key,
+        "roi_weight": args.roi_weight,
+        "contrast_weight": args.contrast_weight,
+        "selection_metric": args.selection_metric,
+    })
 
     # ── Read entity/project from registry ────────────────────────────────
     registry = []
@@ -162,6 +181,9 @@ def main():
             n_runs=args.n_runs,
             entity=entity,
             project=project,
+            roi_weight=args.roi_weight,
+            contrast_weight=args.contrast_weight,
+            selection_metric=args.selection_metric,
         )
         elapsed = (time.time() - t_start) / 3600
         log.info(f"  Sweep finished — {args.n_runs} runs in {elapsed:.1f} hours")

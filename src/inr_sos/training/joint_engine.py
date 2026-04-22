@@ -182,6 +182,8 @@ def optimize_joint(
     joint_lr_factor=0.1,
     use_wandb=False,
     label="joint",
+    selection_metric="loss",
+    gt_for_selection=None,
 ):
     """Joint denoiser + reconstructor optimization.
 
@@ -205,6 +207,10 @@ def optimize_joint(
         joint_lr_factor: LR multiplier for Stage 3 (default 0.1, staged only).
         use_wandb:    whether to log to W&B.
         label:        run label for logging.
+        selection_metric: "loss" (default) or "mae_roi" — criterion for best
+                     model checkpoint in Stage 3.
+        gt_for_selection: ground truth slowness (flat array) required when
+                     selection_metric="mae_roi".
 
     Returns:
         dict with 's_phys', 'loss_history', 'd_denoised', 'lambda_trajectory', etc.
@@ -257,6 +263,8 @@ def optimize_joint(
             lambda_strategy, lambda_cfg,
             pretrain_denoiser_steps, pretrain_recon_steps, joint_steps,
             joint_lr_factor, use_wandb, label,
+            selection_metric=selection_metric,
+            gt_for_selection=gt_for_selection,
         )
     else:
         raise ValueError(f"Unknown mode: {mode}")
@@ -412,6 +420,7 @@ def _train_staged(
     lambda_strategy, lambda_cfg,
     pretrain_dn_steps, pretrain_rc_steps, joint_steps,
     joint_lr_factor, use_wandb, label,
+    selection_metric="loss", gt_for_selection=None,
 ):
     loss_history = []
     recon_losses = []
@@ -509,6 +518,27 @@ def _train_staged(
     best_state_dn = copy.deepcopy(denoiser.state_dict())
     best_state_rc = copy.deepcopy(recon_model.state_dict())
 
+    # Oracle model selection on MAE_roi (uses GT for checkpoint only, not gradients)
+    _use_mae_roi = (selection_metric == "mae_roi" and gt_for_selection is not None)
+    _roi_mask_sel = None
+    best_mae_roi = float("inf")
+    if _use_mae_roi:
+        from inr_sos.evaluation.metrics import compute_roi_masks
+        _gt_np = gt_for_selection
+        if isinstance(_gt_np, torch.Tensor):
+            _gt_np = _gt_np.detach().cpu().numpy()
+        _gt_flat = np.asarray(_gt_np).flatten()
+        if np.mean(_gt_flat) < 1.0:
+            _gt_sos = (1.0 / np.clip(_gt_flat, _SLOWNESS_MIN, _SLOWNESS_MAX)).reshape(64, 64)
+        else:
+            _gt_sos = _gt_flat.reshape(64, 64)
+        _roi_mask_sel, _ = compute_roi_masks(_gt_sos)
+        if _roi_mask_sel is not None:
+            log.info(f"  Model selection: MAE_roi ({int(_roi_mask_sel.sum())} ROI pixels)")
+        else:
+            log.info("  Model selection: MAE_roi requested but Otsu failed, falling back to loss")
+            _use_mae_roi = False
+
     pbar = tqdm(range(joint_steps), desc="Stage3:Joint")
     for step in pbar:
         denoiser.train()
@@ -543,10 +573,20 @@ def _train_staged(
         fit_losses.append(loss_fit.item())
         lambda_trajectory.append(lam)
 
-        if loss_val < best_loss:
-            best_loss = loss_val
-            best_state_dn = copy.deepcopy(denoiser.state_dict())
-            best_state_rc = copy.deepcopy(recon_model.state_dict())
+        if _use_mae_roi:
+            if step % 50 == 0:
+                with torch.no_grad():
+                    _pred_sos = (1.0 / s_phys.detach().cpu().numpy().flatten()).reshape(64, 64)
+                    _mr = float(np.abs(_pred_sos[_roi_mask_sel] - _gt_sos[_roi_mask_sel]).mean())
+                    if _mr < best_mae_roi:
+                        best_mae_roi = _mr
+                        best_state_dn = copy.deepcopy(denoiser.state_dict())
+                        best_state_rc = copy.deepcopy(recon_model.state_dict())
+        else:
+            if loss_val < best_loss:
+                best_loss = loss_val
+                best_state_dn = copy.deepcopy(denoiser.state_dict())
+                best_state_rc = copy.deepcopy(recon_model.state_dict())
 
         if step % 50 == 0:
             pbar.set_description(

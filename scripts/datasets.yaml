@@ -59,29 +59,29 @@ datasets:
       time_scale: "auto"
       parameters:
         # Denoiser architecture
-        dn_model_type: {values: ["FourierMLP", "SirenMLP"]}
+        dn_model_type: ["FourierMLP", "SirenMLP"]
         dn_scale: {distribution: "log_uniform_values", min: 0.5, max: 20.0}
         dn_omega: {distribution: "log_uniform_values", min: 10.0, max: 60.0}
-        dn_hidden_features: {values: [64, 128, 256]}
-        dn_hidden_layers: {values: [2, 3]}
+        dn_hidden_features: [64, 128, 256]
+        dn_hidden_layers: [2, 3]
         # Reconstructor architecture
-        rc_model_type: {values: ["ReluMLP", "FourierMLP", "SirenMLP", "GeluMLP"]}
-        rc_hidden_features: {values: [128, 256, 512]}
-        rc_hidden_layers: {values: [2, 3, 4]}
+        rc_model_type: ["ReluMLP", "FourierMLP", "SirenMLP", "GeluMLP"]
+        rc_hidden_features: [128, 256, 512]
+        rc_hidden_layers: [2, 3, 4]
         rc_lr: {distribution: "log_uniform_values", min: 1e-5, max: 1e-3}
-        rc_mapping_size: {values: [32, 64, 128]}
+        rc_mapping_size: [32, 64, 128]
         rc_scale: {distribution: "log_uniform_values", min: 0.5, max: 10.0}
         rc_omega: {distribution: "log_uniform_values", min: 10.0, max: 60.0}
         # Regularization (0 = off)
-        rc_tv_weight: {values: [0, 0.0001, 0.001, 0.01, 0.1]}
-        rc_reg_weight: {values: [0, 0.0001, 0.001, 0.01]}
+        rc_tv_weight: [0, 0.0001, 0.001, 0.01, 0.1]
+        rc_reg_weight: [0, 0.0001, 0.001, 0.01]
         # Training schedule
-        pretrain_dn_steps: {values: [200, 300, 500, 800, 1000]}
-        pretrain_rc_steps: {values: [300, 500, 800]}
-        joint_steps: {values: [1000, 2000, 3000, 5000]}
+        pretrain_dn_steps: [200, 300, 500, 800, 1000]
+        pretrain_rc_steps: [300, 500, 800]
+        joint_steps: [1000, 2000, 3000, 5000]
         joint_lr_factor: {distribution: "log_uniform_values", min: 0.01, max: 0.5}
         # Lambda strategy
-        lambda_strategy: {values: ["fixed", "cosine", "balanced", "residual"]}
+        lambda_strategy: ["fixed", "cosine", "balanced", "residual"]
         lambda_fit: {distribution: "log_uniform_values", min: 0.01, max: 2.0}
         lambda_max: {distribution: "log_uniform_values", min: 0.1, max: 5.0}
         lambda_min: {distribution: "log_uniform_values", min: 0.001, max: 0.1}
@@ -124,29 +124,29 @@ datasets:
       time_scale: "auto"
       parameters:
         # Denoiser architecture
-        dn_model_type: {values: ["FourierMLP", "SirenMLP"]}
+        dn_model_type: ["FourierMLP", "SirenMLP"]
         dn_scale: {distribution: "log_uniform_values", min: 0.5, max: 20.0}
         dn_omega: {distribution: "log_uniform_values", min: 10.0, max: 60.0}
-        dn_hidden_features: {values: [64, 128, 256]}
-        dn_hidden_layers: {values: [2, 3]}
+        dn_hidden_features: [64, 128, 256]
+        dn_hidden_layers: [2, 3]
         # Reconstructor architecture
-        rc_model_type: {values: ["ReluMLP", "FourierMLP", "SirenMLP", "GeluMLP"]}
-        rc_hidden_features: {values: [128, 256, 512]}
-        rc_hidden_layers: {values: [2, 3, 4]}
+        rc_model_type: ["ReluMLP", "FourierMLP", "SirenMLP", "GeluMLP"]
+        rc_hidden_features: [128, 256, 512]
+        rc_hidden_layers: [2, 3, 4]
         rc_lr: {distribution: "log_uniform_values", min: 1e-5, max: 1e-3}
-        rc_mapping_size: {values: [32, 64, 128]}
+        rc_mapping_size: [32, 64, 128]
         rc_scale: {distribution: "log_uniform_values", min: 0.5, max: 10.0}
         rc_omega: {distribution: "log_uniform_values", min: 10.0, max: 60.0}
         # Regularization (0 = off)
-        rc_tv_weight: {values: [0, 0.0001, 0.001, 0.01, 0.1]}
-        rc_reg_weight: {values: [0, 0.0001, 0.001, 0.01]}
+        rc_tv_weight: [0, 0.0001, 0.001, 0.01, 0.1]
+        rc_reg_weight: [0, 0.0001, 0.001, 0.01]
         # Training schedule
-        pretrain_dn_steps: {values: [200, 300, 500, 800, 1000]}
-        pretrain_rc_steps: {values: [300, 500, 800]}
-        joint_steps: {values: [1000, 2000, 3000, 5000]}
+        pretrain_dn_steps: [200, 300, 500, 800, 1000]
+        pretrain_rc_steps: [300, 500, 800]
+        joint_steps: [1000, 2000, 3000, 5000]
         joint_lr_factor: {distribution: "log_uniform_values", min: 0.01, max: 0.5}
         # Lambda strategy
-        lambda_strategy: {values: ["fixed", "cosine", "balanced", "residual"]}
+        lambda_strategy: ["fixed", "cosine", "balanced", "residual"]
         lambda_fit: {distribution: "log_uniform_values", min: 0.01, max: 2.0}
         lambda_max: {distribution: "log_uniform_values", min: 0.1, max: 5.0}
         lambda_min: {distribution: "log_uniform_values", min: 0.001, max: 0.1}
@@ -296,9 +296,144 @@ datasets:
         time_scale: [1e6, 2e7]
 
   phantom:
-    name: "description"
+    name: "Phantom Data (4 samples, real ultrasound)"
     data_file: "/DL-based-SoS/test_PhantomData.mat"
-  
+    has_baselines: true
+    has_A_matrix: false
+    matrix_file: "/DL-based-SoS/A.mat"
+    pix2time: 4.966887417218542e-08
+    bf_sos: 1510.0
+    notes: >-
+      Real phantom acquisitions (4 samples). Embedded L1/L2 reconstructions
+      (all_slowness_recons_l1/l2), correlation vector (all_correlation_vector),
+      and per-pair MaskSoS of shape (8, 128, 128) — 8 firing pairs x 128x128
+      beamformed channels. No A matrix embedded; requires external dense A.mat
+      (same transducer as kwave_geom/kwave_blob). reg_param=0.1, bf_sos=1510.0.
+    sweep:
+      n_eval_samples: 3
+      time_scale: "auto"
+      parameters:
+        method: ["Full_Matrix", "Sequential_SGD"]
+        model_type: ["FourierMLP", "ReluMLP", "SirenMLP", "GeluMLP"]
+        hidden_features: [128, 256, 512]
+        hidden_layers: [2, 3, 4, 5]
+        lr: {distribution: "log_uniform_values", min: 1e-6, max: 1e-3}
+        steps: [200, 500, 750, 1000]
+        tv_weight: {distribution: "log_uniform_values", min: 1e-3, max: 1.0}
+        reg_weight: {distribution: "log_uniform_values", min: 1e-4, max: 1e-1}
+        loss_type: ["mse", "mae", "huber"]
+        huber_delta: {distribution: "log_uniform_values", min: 0.01, max: 2.0}
+        clamp_slowness: [true, false]
+        early_stopping: [true]
+        patience: [50, 100, 200]
+        mapping_size: [32, 64, 128]
+        scale: {distribution: "uniform", min: 0.1, max: 5.0}
+        omega: {distribution: "uniform", min: 10.0, max: 60.0}
+        epochs: [100, 150, 200]
+        batch_size: [2048, 4096, 8192]
+        time_scale: [1e6, 2e7]
+    joint_sweep:
+      n_eval_samples: 3
+      time_scale: "auto"
+      parameters:
+        # Denoiser architecture
+        dn_model_type: ["FourierMLP", "SirenMLP"]
+        dn_scale: {distribution: "log_uniform_values", min: 0.5, max: 20.0}
+        dn_omega: {distribution: "log_uniform_values", min: 10.0, max: 60.0}
+        dn_hidden_features: [64, 128, 256]
+        dn_hidden_layers: [2, 3]
+        # Reconstructor architecture
+        rc_model_type: ["ReluMLP", "FourierMLP", "SirenMLP", "GeluMLP"]
+        rc_hidden_features: [128, 256, 512]
+        rc_hidden_layers: [2, 3, 4]
+        rc_lr: {distribution: "log_uniform_values", min: 1e-5, max: 1e-3}
+        rc_mapping_size: [32, 64, 128]
+        rc_scale: {distribution: "log_uniform_values", min: 0.5, max: 10.0}
+        rc_omega: {distribution: "log_uniform_values", min: 10.0, max: 60.0}
+        # Regularization (0 = off)
+        rc_tv_weight: [0, 0.0001, 0.001, 0.01, 0.1]
+        rc_reg_weight: [0, 0.0001, 0.001, 0.01]
+        # Training schedule
+        pretrain_dn_steps: [200, 300, 500, 800, 1000]
+        pretrain_rc_steps: [300, 500, 800]
+        joint_steps: [1000, 2000, 3000, 5000]
+        joint_lr_factor: {distribution: "log_uniform_values", min: 0.01, max: 0.5}
+        # Lambda strategy
+        lambda_strategy: ["fixed", "cosine", "balanced", "residual"]
+        lambda_fit: {distribution: "log_uniform_values", min: 0.01, max: 2.0}
+        lambda_max: {distribution: "log_uniform_values", min: 0.1, max: 5.0}
+        lambda_min: {distribution: "log_uniform_values", min: 0.001, max: 0.1}
+        target_ratio: {distribution: "log_uniform_values", min: 0.1, max: 10.0}
+        alpha: {distribution: "log_uniform_values", min: 0.05, max: 2.0}
+
   breast_data:
-    name: "description"
+    name: "Breast Data (2 samples, in vivo clinical)"
     data_file: "/DL-based-SoS/test_BreastData.mat"
+    has_baselines: true
+    has_A_matrix: false
+    matrix_file: "/DL-based-SoS/A.mat"
+    pix2time: 4.966887417218542e-08
+    bf_sos: 1510.0
+    notes: >-
+      In vivo breast acquisitions (2 samples). Embedded L1/L2 reconstructions
+      (all_slowness_recons_l1/l2) and per-pair MaskSoS of shape (8, 128, 128).
+      Unlike phantom/k-wave datasets, all_correlation_vector has shape (1, 131072) —
+      a single shared correlation vector across both samples. imgs_gt is a
+      reference reconstruction rather than true ground truth (no phantom known).
+      reg_param=1.0 (larger than phantom's 0.1). Requires external /DL-based-SoS/A.mat.
+    sweep:
+      n_eval_samples: 2
+      time_scale: "auto"
+      parameters:
+        method: ["Full_Matrix", "Sequential_SGD"]
+        model_type: ["FourierMLP", "ReluMLP", "SirenMLP", "GeluMLP"]
+        hidden_features: [128, 256, 512]
+        hidden_layers: [2, 3, 4, 5]
+        lr: {distribution: "log_uniform_values", min: 1e-6, max: 1e-3}
+        steps: [200, 500, 750, 1000]
+        tv_weight: {distribution: "log_uniform_values", min: 1e-3, max: 1.0}
+        reg_weight: {distribution: "log_uniform_values", min: 1e-4, max: 1e-1}
+        loss_type: ["mse", "mae", "huber"]
+        huber_delta: {distribution: "log_uniform_values", min: 0.01, max: 2.0}
+        clamp_slowness: [true, false]
+        early_stopping: [true]
+        patience: [50, 100, 200]
+        mapping_size: [32, 64, 128]
+        scale: {distribution: "uniform", min: 0.1, max: 5.0}
+        omega: {distribution: "uniform", min: 10.0, max: 60.0}
+        epochs: [100, 150, 200]
+        batch_size: [2048, 4096, 8192]
+        time_scale: [1e6, 2e7]
+    joint_sweep:
+      n_eval_samples: 2
+      time_scale: "auto"
+      parameters:
+        # Denoiser architecture
+        dn_model_type: ["FourierMLP", "SirenMLP"]
+        dn_scale: {distribution: "log_uniform_values", min: 0.5, max: 20.0}
+        dn_omega: {distribution: "log_uniform_values", min: 10.0, max: 60.0}
+        dn_hidden_features: [64, 128, 256]
+        dn_hidden_layers: [2, 3]
+        # Reconstructor architecture
+        rc_model_type: ["ReluMLP", "FourierMLP", "SirenMLP", "GeluMLP"]
+        rc_hidden_features: [128, 256, 512]
+        rc_hidden_layers: [2, 3, 4]
+        rc_lr: {distribution: "log_uniform_values", min: 1e-5, max: 1e-3}
+        rc_mapping_size: [32, 64, 128]
+        rc_scale: {distribution: "log_uniform_values", min: 0.5, max: 10.0}
+        rc_omega: {distribution: "log_uniform_values", min: 10.0, max: 60.0}
+        # Regularization (0 = off)
+        rc_tv_weight: [0, 0.0001, 0.001, 0.01, 0.1]
+        rc_reg_weight: [0, 0.0001, 0.001, 0.01]
+        # Training schedule
+        pretrain_dn_steps: [200, 300, 500, 800, 1000]
+        pretrain_rc_steps: [300, 500, 800]
+        joint_steps: [1000, 2000, 3000, 5000]
+        joint_lr_factor: {distribution: "log_uniform_values", min: 0.01, max: 0.5}
+        # Lambda strategy
+        lambda_strategy: ["fixed", "cosine", "balanced", "residual"]
+        lambda_fit: {distribution: "log_uniform_values", min: 0.01, max: 2.0}
+        lambda_max: {distribution: "log_uniform_values", min: 0.1, max: 5.0}
+        lambda_min: {distribution: "log_uniform_values", min: 0.001, max: 0.1}
+        target_ratio: {distribution: "log_uniform_values", min: 0.1, max: 10.0}
+        alpha: {distribution: "log_uniform_values", min: 0.05, max: 2.0}

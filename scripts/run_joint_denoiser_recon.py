@@ -21,6 +21,57 @@ Usage:
     # Residual-normalized (sweep α)
     python scripts/run_joint_denoiser_recon.py --n_samples 5 \
         --lambda_strategy residual --alpha 0.1 0.5 1.0
+
+--------------------------------------------------------------------------
+SWEEP → REPLAY MAPPING (kwave_blob joint sweeps, Plan B ablation)
+--------------------------------------------------------------------------
+Each row lists the create/run commands that produced the sweep and the
+replay command we use to evaluate its top-K on held-out samples.
+
+[ydma0yxl] Pre-Plan-B baseline — ranked by MAE_mean (flat-winner regime)
+  Create: uv run create_joint_sweep.py --dataset kwave_blob --n_runs 200
+  Run:    python run_joint_sweep.py --sweep_id ydma0yxl --n_runs 200 \
+            --dataset kwave_blob --n_samples 10
+  Replay: python run_joint_denoiser_recon.py --dataset kwave_blob \
+            --sweep_id ydma0yxl --top_k 7 --n_samples 10 \
+            --selection_metric mae_roi --report_plots
+
+[q2p4zv3e] B1-B3 only — ROI composite (5 sweep samples via yaml default)
+  Create: uv run create_joint_sweep.py --dataset kwave_blob --n_runs 100 \
+            --metric MAE_composite_mean
+  Run:    python run_joint_sweep.py --sweep_id q2p4zv3e --n_runs 100 \
+            --dataset kwave_blob --roi_weight 0.7
+          # --n_samples not passed → falls back to joint_sweep.n_eval_samples
+          # (= 5) in scripts/datasets.yaml, producing indices [22,0,49,4,54].
+  Replay: python run_joint_denoiser_recon.py --dataset kwave_blob \
+            --sweep_id q2p4zv3e --top_k 7 --n_samples 10 \
+            --selection_metric mae_roi --report_plots
+
+[edj3mqou] Pure ROI — roi_weight = 1.0 (no contrast penalty)
+  Create: uv run create_joint_sweep.py --dataset kwave_blob --n_runs 100 \
+            --metric MAE_composite_mean
+  Run:    python run_joint_sweep.py --sweep_id edj3mqou --n_runs 100 \
+            --dataset kwave_blob --n_samples 10 --roi_weight 1.0
+  Replay: python run_joint_denoiser_recon.py --dataset kwave_blob \
+            --sweep_id edj3mqou --top_k 7 --n_samples 10 \
+            --selection_metric mae_roi --report_plots
+
+[z7bs7iy5] Full Plan B — inclusion-aware (composite + contrast + oracle)
+  Create: uv run create_joint_sweep.py --dataset kwave_blob --n_runs 150 \
+            --metric MAE_composite_mean
+  Run:    python run_joint_sweep.py --sweep_id z7bs7iy5 --n_runs 150 \
+            --dataset kwave_blob --n_samples 10 \
+            --roi_weight 0.7 --contrast_weight 1.0 --selection_metric mae_roi
+  Replay: python run_joint_denoiser_recon.py --dataset kwave_blob \
+            --sweep_id z7bs7iy5 --top_k 7 --n_samples 10 \
+            --selection_metric mae_roi --report_plots
+
+Replay convention: --roi_weight / --contrast_weight belong to the sweep
+(they configure the ranking objective inside run_joint_sweep.py). They are
+NOT replay-side flags and do nothing here. Only --selection_metric is a
+replay-side knob: it sets the Stage 3c checkpoint criterion during replay
+training. For a fair comparison across sweeps, use --selection_metric mae_roi
+on all replays.
 """
 
 import argparse
@@ -44,16 +95,25 @@ from inr_sos.utils.data import USDataset
 from inr_sos.utils.config import ExperimentConfig
 from inr_sos.evaluation.metrics import calculate_metrics
 from inr_sos.evaluation.sweep_indices import load_sweep_indices
-from inr_sos.models.mlp import ReluMLP
+from inr_sos.models.mlp import ReluMLP, FourierMLP, GeluMLP
+from inr_sos.models.siren import SirenMLP
 from inr_sos.training.engines import optimize_full_forward_operator
 from inr_sos.training.denoise_engine import DEFAULT_DENOISE_CFG
 from inr_sos.training.joint_engine import optimize_joint
+
+_RECON_MODEL_MAP = {
+    "ReluMLP": ReluMLP,
+    "FourierMLP": FourierMLP,
+    "GeluMLP": GeluMLP,
+    "SirenMLP": SirenMLP,
+}
 from inr_sos.visualization.report_figures import (
     plot_method_grid,
     plot_metrics_comparison,
 )
 
 SCRIPTS_DIR = Path(__file__).parent
+REGISTRY_FILE = SCRIPTS_DIR / "sweep_registry.json"
 OUTPUT_DIR = SCRIPTS_DIR / "data" / "joint_denoiser_recon"
 
 logging.basicConfig(
@@ -89,6 +149,135 @@ def build_recon_model(cfg):
         hidden_layers=cfg.hidden_layers,
         mapping_size=cfg.mapping_size,
     )
+
+
+def fetch_topk_joint_configs(sweep_id, top_k, logger):
+    """Fetch top-k configs from a joint W&B sweep, sorted by MAE_mean.
+
+    Returns list of dicts, each with keys needed by optimize_joint:
+      rank, label, denoise_cfg, recon_cfg_overrides, lambda_strategy,
+      lambda_fit, lambda_cfg, pretrain_dn_steps, pretrain_rc_steps,
+      joint_steps, joint_lr_factor.
+    """
+    import wandb as wb
+
+    # Find entry in registry
+    with open(REGISTRY_FILE) as f:
+        registry = json.load(f)
+    entry = None
+    for e in registry:
+        if e["sweep_id"].startswith(sweep_id):
+            entry = e
+            break
+    if entry is None:
+        raise ValueError(f"Sweep ID '{sweep_id}' not found in {REGISTRY_FILE}")
+
+    logger.info(f"  Fetching top-{top_k} from joint sweep {entry['sweep_id']}")
+
+    api = wb.Api()
+    sweep = api.sweep(f"{entry['entity']}/{entry['project']}/{entry['sweep_id']}")
+    completed = sorted(
+        [r for r in sweep.runs if "MAE_mean" in r.summary],
+        key=lambda r: r.summary["MAE_mean"],
+    )
+    selected = completed[:top_k]
+
+    def _g(key, default, cast=float):
+        """Safely read a value from W&B config — handles param spec dicts."""
+        val = sc.get(key, default)
+        if isinstance(val, dict):
+            val = default
+        return cast(val)
+
+    configs = []
+    for rank, run in enumerate(selected, 1):
+        sc = run.config
+
+        # Denoiser config
+        dn_cfg = dict(DEFAULT_DENOISE_CFG)
+        dn_cfg["model_type"] = _g("dn_model_type", dn_cfg.get("model_type", "FourierMLP"), str)
+        dn_cfg["scale"] = _g("dn_scale", dn_cfg["scale"], float)
+        dn_cfg["omega"] = _g("dn_omega", dn_cfg.get("omega", 15.0), float)
+        dn_cfg["hidden_features"] = _g("dn_hidden_features", dn_cfg["hidden_features"], int)
+        dn_cfg["hidden_layers"] = _g("dn_hidden_layers", dn_cfg["hidden_layers"], int)
+
+        # Reconstructor overrides
+        rc_model_type = _g("rc_model_type", "ReluMLP", str)
+        rc_overrides = {
+            "model_type": rc_model_type,
+            "hidden_features": _g("rc_hidden_features", 256, int),
+            "hidden_layers": _g("rc_hidden_layers", 3, int),
+            "mapping_size": _g("rc_mapping_size", 64, int),
+            "lr": _g("rc_lr", 1e-4, float),
+            "tv_weight": _g("rc_tv_weight", 0.0, float),
+            "reg_weight": _g("rc_reg_weight", 0.0, float),
+        }
+        if rc_model_type == "FourierMLP":
+            rc_overrides["scale"] = _g("rc_scale", 10.0, float)
+        elif rc_model_type == "SirenMLP":
+            rc_overrides["omega"] = _g("rc_omega", 30.0, float)
+
+        # Lambda
+        lam_strategy = _g("lambda_strategy", "fixed", str)
+        lam_fit = _g("lambda_fit", 0.1, float)
+        lam_cfg = {}
+        if lam_strategy == "cosine":
+            lam_cfg["lambda_max"] = _g("lambda_max", 1.0, float)
+            lam_cfg["lambda_min"] = _g("lambda_min", 0.01, float)
+        elif lam_strategy == "balanced":
+            lam_cfg["target_ratio"] = _g("target_ratio", 1.0, float)
+            lam_cfg["lambda_min"] = _g("lambda_min", 0.001, float)
+            lam_cfg["lambda_max"] = _g("lambda_max", 10.0, float)
+        elif lam_strategy == "residual":
+            lam_cfg["alpha"] = _g("alpha", 0.5, float)
+
+        # Schedule
+        dn_steps = _g("pretrain_dn_steps", 300, int)
+        rc_steps = _g("pretrain_rc_steps", 500, int)
+        j_steps = _g("joint_steps", 2000, int)
+        j_lr_factor = _g("joint_lr_factor", 0.1, float)
+
+        sweep_mae = run.summary.get("MAE_mean", float("inf"))
+        sweep_cnr = run.summary.get("CNR_mean", 0.0)
+
+        short = f"rank{rank}_{rc_model_type}_{lam_strategy}"
+        logger.info(f"  #{rank}: {short}  sweep_MAE={sweep_mae:.2f}  sweep_CNR={sweep_cnr:.3f}")
+
+        configs.append({
+            "rank": rank,
+            "label": short,
+            "denoise_cfg": dn_cfg,
+            "rc_overrides": rc_overrides,
+            "lambda_strategy": lam_strategy,
+            "lambda_fit": lam_fit,
+            "lambda_cfg": lam_cfg,
+            "pretrain_dn_steps": dn_steps,
+            "pretrain_rc_steps": rc_steps,
+            "joint_steps": j_steps,
+            "joint_lr_factor": j_lr_factor,
+            "sweep_mae": sweep_mae,
+            "sweep_cnr": sweep_cnr,
+            "raw_config": {k: v for k, v in sc.items() if k != "_wandb"},
+        })
+
+    return configs
+
+
+def _build_recon_model_from_overrides(rc_overrides, base_cfg):
+    """Build a reconstructor model from sweep overrides."""
+    mtype = rc_overrides["model_type"]
+    model_cls = _RECON_MODEL_MAP[mtype]
+    kwargs = dict(
+        in_features=base_cfg.in_features,
+        hidden_features=rc_overrides["hidden_features"],
+        hidden_layers=rc_overrides["hidden_layers"],
+        mapping_size=rc_overrides["mapping_size"],
+    )
+    if mtype == "FourierMLP":
+        kwargs["scale"] = rc_overrides.get("scale", 10.0)
+    elif mtype == "SirenMLP":
+        kwargs["omega"] = rc_overrides.get("omega", 30.0)
+    return model_cls(**kwargs)
 
 
 def _to_sos(s_flat):
@@ -228,6 +417,9 @@ def main():
     parser.add_argument("--n_samples", type=int, default=None)
     parser.add_argument("--indices", nargs="+", type=int, default=None)
     parser.add_argument("--lambda_fit", nargs="+", type=float, default=[0.1])
+    parser.add_argument("--mode", default="staged",
+                        choices=["staged", "end_to_end", "alternating"],
+                        help="Training mode: staged (default), end_to_end, or alternating")
     parser.add_argument("--joint_steps", type=int, default=2000)
     parser.add_argument("--pretrain_dn_steps", type=int, default=300)
     parser.add_argument("--pretrain_rc_steps", type=int, default=500)
@@ -261,10 +453,14 @@ def main():
     parser.add_argument(
         "--sweep_id",
         default=None,
-        help="Sweep ID prefix to look up in sweep_registry.json when excluding "
-             "sweep samples (optional; if omitted the most recent entry for "
-             "--dataset is used).",
+        help="Joint sweep ID. When combined with --top_k, fetches top-k configs "
+             "from this sweep and runs each one. Also used for sample exclusion.",
     )
+    parser.add_argument("--top_k", type=int, default=None,
+                        help="Fetch top-k configs from --sweep_id and run each one. "
+                             "Overrides manual lambda/denoiser/recon config.")
+    parser.add_argument("--selection_metric", default="loss", choices=["loss", "mae_roi"],
+                        help="Model checkpoint criterion in Stage 3 (default: loss)")
     args = parser.parse_args()
 
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -278,7 +474,7 @@ def main():
     })
 
     log.info("=" * 70)
-    log.info("  Experiment 11: Joint Denoiser + Reconstructor (staged)")
+    log.info(f"  Experiment 11: Joint Denoiser + Reconstructor ({args.mode})")
     log.info(f"  Dataset: {args.dataset}")
     log.info(f"  λ strategy: {args.lambda_strategy}")
     if args.lambda_strategy == "fixed":
@@ -366,74 +562,138 @@ def main():
             "loss_history": res["loss_history"],
         })
 
-    # ── Build joint configs based on lambda strategy ───────────────────────
-    joint_configs = []  # list of (method_label, lambda_fit, lambda_cfg)
+    # ── Build joint configs ─────────────────────────────────────────────
+    if args.top_k and args.sweep_id:
+        # ── Top-K from sweep: fetch configs from W&B ────────────────────
+        log.info(f"\n── Top-{args.top_k} configs from joint sweep {args.sweep_id} ──")
+        topk_configs = fetch_topk_joint_configs(args.sweep_id, args.top_k, log)
 
-    if args.lambda_strategy == "fixed":
-        for lf in args.lambda_fit:
-            joint_configs.append((f"Joint(fix,λ={lf})", lf, {}))
+        for cfg_entry in topk_configs:
+            method_label = cfg_entry["label"]
+            log.info(f"\n── {method_label} ──")
+            all_results[method_label] = []
 
-    elif args.lambda_strategy == "cosine":
-        lam_cfg = {"lambda_max": args.lambda_max, "lambda_min": args.lambda_min}
-        label = f"Joint(cos,{args.lambda_max}→{args.lambda_min})"
-        joint_configs.append((label, args.lambda_max, lam_cfg))
+            # Build per-config recon_cfg
+            rc_ov = cfg_entry["rc_overrides"]
+            cfg_rc = copy.deepcopy(recon_cfg)
+            cfg_rc.model_type = rc_ov["model_type"]
+            cfg_rc.hidden_features = rc_ov["hidden_features"]
+            cfg_rc.hidden_layers = rc_ov["hidden_layers"]
+            cfg_rc.mapping_size = rc_ov["mapping_size"]
+            cfg_rc.lr = rc_ov["lr"]
+            cfg_rc.tv_weight = rc_ov["tv_weight"]
+            cfg_rc.reg_weight = rc_ov["reg_weight"]
+            cfg_rc.steps = cfg_entry["joint_steps"]
 
-    elif args.lambda_strategy == "balanced":
-        for lf in args.lambda_fit:
-            lam_cfg = {
-                "target_ratio": args.target_ratio,
-                "lambda_min": args.lambda_min,
-                "lambda_max": args.lambda_max,
-            }
-            label = f"Joint(bal,r={args.target_ratio},λ₀={lf})"
-            joint_configs.append((label, lf, lam_cfg))
+            for i, (idx, sample) in enumerate(zip(indices, samples)):
+                log.info(f"  {method_label}: sample {i+1}/{len(indices)} (idx={idx})")
+                model = _build_recon_model_from_overrides(rc_ov, cfg_rc)
+                t0 = time.perf_counter()
+                res = optimize_joint(
+                    sample=sample,
+                    L_matrix=dataset.L_matrix,
+                    grid=grid,
+                    recon_model=model,
+                    recon_config=copy.deepcopy(cfg_rc),
+                    denoise_cfg=cfg_entry["denoise_cfg"],
+                    lambda_fit=cfg_entry["lambda_fit"],
+                    mode=args.mode,
+                    lambda_strategy=cfg_entry["lambda_strategy"],
+                    lambda_cfg=cfg_entry["lambda_cfg"],
+                    pretrain_denoiser_steps=cfg_entry["pretrain_dn_steps"],
+                    pretrain_recon_steps=cfg_entry["pretrain_rc_steps"],
+                    joint_steps=cfg_entry["joint_steps"],
+                    joint_lr_factor=cfg_entry["joint_lr_factor"],
+                    use_wandb=False,
+                    label=method_label,
+                    selection_metric=args.selection_metric,
+                    gt_for_selection=sample["s_gt_raw"] if args.selection_metric == "mae_roi" else None,
+                )
+                elapsed = time.perf_counter() - t0
+                m = calculate_metrics(res["s_phys"], sample["s_gt_raw"])
+                m["time_s"] = elapsed
 
-    elif args.lambda_strategy == "residual":
-        for a in args.alpha:
-            lam_cfg = {"alpha": a}
-            label = f"Joint(res,α={a})"
-            joint_configs.append((label, 0.1, lam_cfg))  # base λ unused for residual
+                raw_m = all_results["Raw INR"][i]["metrics"]
+                log.info(f"    Raw MAE={raw_m['MAE']:.1f} → Joint MAE={m['MAE']:.1f}")
 
-    # ── Joint optimization ───────────────────────────────────────────────
-    for method_label, lf, lam_cfg in joint_configs:
-        log.info(f"\n── {method_label} ──")
-        all_results[method_label] = []
+                all_results[method_label].append({
+                    "metrics": m, "s_phys": res["s_phys"],
+                    "loss_history": res["loss_history"],
+                    "recon_losses": res.get("recon_losses"),
+                    "fit_losses": res.get("fit_losses"),
+                    "lambda_trajectory": res.get("lambda_trajectory"),
+                })
 
-        for i, (idx, sample) in enumerate(zip(indices, samples)):
-            log.info(f"  {method_label}: sample {i+1}/{len(indices)} (idx={idx})")
-            model = build_recon_model(recon_cfg)
-            t0 = time.perf_counter()
-            res = optimize_joint(
-                sample=sample,
-                L_matrix=dataset.L_matrix,
-                grid=grid,
-                recon_model=model,
-                recon_config=copy.deepcopy(recon_cfg),
-                denoise_cfg=denoise_cfg,
-                lambda_fit=lf,
-                mode="staged",
-                lambda_strategy=args.lambda_strategy,
-                lambda_cfg=lam_cfg,
-                pretrain_denoiser_steps=args.pretrain_dn_steps,
-                pretrain_recon_steps=args.pretrain_rc_steps,
-                joint_steps=args.joint_steps,
-                use_wandb=False,
-                label=method_label,
-            )
-            elapsed = time.perf_counter() - t0
-            m = calculate_metrics(res["s_phys"], sample["s_gt_raw"])
-            m["time_s"] = elapsed
+    else:
+        # ── Manual configs from CLI args ────────────────────────────────
+        joint_configs = []  # list of (method_label, lambda_fit, lambda_cfg)
 
-            raw_m = all_results["Raw INR"][i]["metrics"]
-            log.info(f"    Raw MAE={raw_m['MAE']:.1f} → Joint MAE={m['MAE']:.1f}")
+        if args.lambda_strategy == "fixed":
+            for lf in args.lambda_fit:
+                joint_configs.append((f"Joint(fix,λ={lf})", lf, {}))
 
-            all_results[method_label].append({
-                "metrics": m, "s_phys": res["s_phys"],
-                "loss_history": res["loss_history"],
-                "recon_losses": res.get("recon_losses"),
-                "fit_losses": res.get("fit_losses"),
-                "lambda_trajectory": res.get("lambda_trajectory"),
-            })
+        elif args.lambda_strategy == "cosine":
+            lam_cfg = {"lambda_max": args.lambda_max, "lambda_min": args.lambda_min}
+            label = f"Joint(cos,{args.lambda_max}→{args.lambda_min})"
+            joint_configs.append((label, args.lambda_max, lam_cfg))
+
+        elif args.lambda_strategy == "balanced":
+            for lf in args.lambda_fit:
+                lam_cfg = {
+                    "target_ratio": args.target_ratio,
+                    "lambda_min": args.lambda_min,
+                    "lambda_max": args.lambda_max,
+                }
+                label = f"Joint(bal,r={args.target_ratio},λ₀={lf})"
+                joint_configs.append((label, lf, lam_cfg))
+
+        elif args.lambda_strategy == "residual":
+            for a in args.alpha:
+                lam_cfg = {"alpha": a}
+                label = f"Joint(res,α={a})"
+                joint_configs.append((label, 0.1, lam_cfg))  # base λ unused for residual
+
+        for method_label, lf, lam_cfg in joint_configs:
+            log.info(f"\n── {method_label} ──")
+            all_results[method_label] = []
+
+            for i, (idx, sample) in enumerate(zip(indices, samples)):
+                log.info(f"  {method_label}: sample {i+1}/{len(indices)} (idx={idx})")
+                model = build_recon_model(recon_cfg)
+                t0 = time.perf_counter()
+                res = optimize_joint(
+                    sample=sample,
+                    L_matrix=dataset.L_matrix,
+                    grid=grid,
+                    recon_model=model,
+                    recon_config=copy.deepcopy(recon_cfg),
+                    denoise_cfg=denoise_cfg,
+                    lambda_fit=lf,
+                    mode=args.mode,
+                    lambda_strategy=args.lambda_strategy,
+                    lambda_cfg=lam_cfg,
+                    pretrain_denoiser_steps=args.pretrain_dn_steps,
+                    pretrain_recon_steps=args.pretrain_rc_steps,
+                    joint_steps=args.joint_steps,
+                    use_wandb=False,
+                    label=method_label,
+                    selection_metric=args.selection_metric,
+                    gt_for_selection=sample["s_gt_raw"] if args.selection_metric == "mae_roi" else None,
+                )
+                elapsed = time.perf_counter() - t0
+                m = calculate_metrics(res["s_phys"], sample["s_gt_raw"])
+                m["time_s"] = elapsed
+
+                raw_m = all_results["Raw INR"][i]["metrics"]
+                log.info(f"    Raw MAE={raw_m['MAE']:.1f} → Joint MAE={m['MAE']:.1f}")
+
+                all_results[method_label].append({
+                    "metrics": m, "s_phys": res["s_phys"],
+                    "loss_history": res["loss_history"],
+                    "recon_losses": res.get("recon_losses"),
+                    "fit_losses": res.get("fit_losses"),
+                    "lambda_trajectory": res.get("lambda_trajectory"),
+                })
 
     # ── Summary table ────────────────────────────────────────────────────
     log.info(f"\n{'='*90}")
@@ -459,14 +719,14 @@ def main():
 
     # ── Thesis-quality report figures (optional, staged results only) ────
     if args.report_plots:
-        # Filter to baselines + staged configs only (end/alt not promising)
+        _baselines = {"L1", "L2", "Raw INR"}
         report_results = {
             method: per_sample
             for method, per_sample in all_results.items()
-            if method in ("L1", "L2", "Raw INR") or method.startswith("Joint")
+            if method in _baselines or method.startswith("Joint") or method.startswith("rank")
         }
-        if not any(m.startswith("Joint") for m in report_results):
-            log.warning("  No staged results to plot — skipping report figures")
+        if not any(m not in _baselines for m in report_results):
+            log.warning("  No joint results to plot — skipping report figures")
         else:
             log.info("\n  Generating report figures (staged only) ...")
             grid_path_svg = run_dir / "report_comparison.svg"
@@ -511,14 +771,23 @@ def main():
     results_json = {
         "timestamp": timestamp,
         "dataset": args.dataset,
-        "mode": "staged",
-        "lambda_strategy": args.lambda_strategy,
-        "lambda_fit_values": args.lambda_fit,
-        "denoise_cfg": denoise_cfg,
+        "mode": args.mode,
         "n_samples": len(indices),
         "indices": indices,
         "methods": {},
     }
+    if args.top_k and args.sweep_id:
+        results_json["config_source"] = "sweep"
+        results_json["sweep_id"] = args.sweep_id
+        results_json["top_k"] = args.top_k
+        results_json["configs"] = {
+            c["label"]: c["raw_config"] for c in topk_configs
+        }
+    else:
+        results_json["config_source"] = "default"
+        results_json["lambda_strategy"] = args.lambda_strategy
+        results_json["lambda_fit_values"] = args.lambda_fit
+        results_json["denoise_cfg"] = denoise_cfg
     for method, per_sample in all_results.items():
         results_json["methods"][method] = [r["metrics"] for r in per_sample]
 

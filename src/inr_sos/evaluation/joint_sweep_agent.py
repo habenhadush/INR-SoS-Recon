@@ -23,7 +23,7 @@ import logging
 import numpy as np
 import wandb
 
-from inr_sos.evaluation.metrics import calculate_metrics
+from inr_sos.evaluation.metrics import calculate_metrics, compute_sweep_objective
 from inr_sos.evaluation.sweep_agent import (
     _load_dataset_sweep_config,
     _yaml_param_to_wandb,
@@ -116,6 +116,9 @@ def run_joint_sweep_agent(
     n_runs: int = 100,
     entity: str = None,
     project: str = None,
+    roi_weight: float = 0.7,
+    contrast_weight: float = 0.0,
+    selection_metric: str = "loss",
 ):
     """Launch the joint sweep agent.
 
@@ -129,6 +132,12 @@ def run_joint_sweep_agent(
     n_runs         : total Bayesian trials
     entity         : W&B entity
     project        : W&B project name
+    roi_weight     : blend weight for MAE_composite. 1.0 = pure MAE_roi,
+                     0.0 = pure MAE_mean, 0.7 = 70% MAE_roi + 30% MAE_mean.
+    contrast_weight: multiplicative penalty for low contrast recovery.
+                     0.0 = no penalty, 1.0 = doubles objective when CR=0.
+    selection_metric: "loss" or "mae_roi" — model checkpoint criterion in
+                     Stage 3 of optimize_joint.
     """
     project = project or "INR-SoS-Recon"
 
@@ -190,6 +199,7 @@ def run_joint_sweep_agent(
 
         # ── Train on every target sample ─────────────────────────────────
         all_mae, all_ssim, all_rmse, all_cnr = [], [], [], []
+        all_mae_roi, all_mae_bkg, all_contrast, all_composite = [], [], [], []
 
         for sample_num, idx in enumerate(target_indices):
             sample = dataset[idx]
@@ -224,6 +234,8 @@ def run_joint_sweep_agent(
                 joint_lr_factor=joint_lr_factor,
                 use_wandb=False,
                 label=f"sweep_s{idx}",
+                selection_metric=selection_metric,
+                gt_for_selection=sample["s_gt_raw"] if selection_metric == "mae_roi" else None,
             )
 
             metrics = calculate_metrics(
@@ -231,16 +243,26 @@ def run_joint_sweep_agent(
                 s_gt_raw=sample["s_gt_raw"],
                 grid_shape=(64, 64),
             )
+            objective = compute_sweep_objective(metrics, roi_weight, contrast_weight)
+
             all_mae.append(metrics["MAE"])
             all_ssim.append(metrics["SSIM"])
             all_rmse.append(metrics["RMSE"])
             all_cnr.append(metrics["CNR"])
+            all_mae_roi.append(metrics["MAE_roi"])
+            all_mae_bkg.append(metrics["MAE_bkg"])
+            all_contrast.append(metrics["contrast_recovery"])
+            all_composite.append(objective)
 
             wandb.log({
                 "sample/MAE": metrics["MAE"],
                 "sample/SSIM": metrics["SSIM"],
                 "sample/RMSE": metrics["RMSE"],
                 "sample/CNR": metrics["CNR"],
+                "sample/MAE_roi": metrics["MAE_roi"],
+                "sample/MAE_bkg": metrics["MAE_bkg"],
+                "sample/contrast_recovery": metrics["contrast_recovery"],
+                "sample/sweep_objective": objective,
                 "sample/idx": idx,
             }, step=sample_num)
 
@@ -254,6 +276,14 @@ def run_joint_sweep_agent(
             "SSIM_std": float(np.std(all_ssim)),
             "CNR_mean": float(np.mean(all_cnr)),
             "CNR_std": float(np.std(all_cnr)),
+            "MAE_roi_mean": float(np.mean(all_mae_roi)),
+            "MAE_roi_std":  float(np.std(all_mae_roi)),
+            "MAE_bkg_mean": float(np.mean(all_mae_bkg)),
+            "contrast_recovery_mean": float(np.mean(all_contrast)),
+            "MAE_composite_mean": float(np.mean(all_composite)),
+            "MAE_composite_std":  float(np.std(all_composite)),
+            "roi_weight": float(roi_weight),
+            "contrast_weight": float(contrast_weight),
         })
         wandb.finish()
 

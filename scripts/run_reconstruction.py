@@ -166,7 +166,7 @@ def run_inr_config(sweep_cfg, dataset, indices, base_config, run_tag, log,
     method  = sweep_cfg["method"]
     mtype   = sweep_cfg["model_type"]
     hparams = sweep_cfg["hyperparams"]
-    label   = f"INR_rank{rank}_{method}_{mtype}"
+    label   = f"{method} / {mtype}"
     wb_name = f"{run_tag}_rank{rank}_{method}_{mtype}"
 
     log.info(f"\n  ── rank#{rank}: {method} / {mtype} ──")
@@ -426,8 +426,7 @@ def _make_recon_grid(all_results, n_vis=2, rng_seed=42):
                                interpolation="nearest")
             ax_sos.axis("off")
             if row_pair == 0:
-                parts = result["method"].replace("INR_", "").split("_")
-                ax_sos.set_title(parts[0], fontsize=9, fontweight="bold")
+                ax_sos.set_title(result["method"], fontsize=7, fontweight="bold")
             plt.colorbar(im, ax=ax_sos, fraction=0.046, pad=0.04)
 
             if has_gt:
@@ -580,8 +579,9 @@ def main():
 
     registry, entry = load_registry(args.sweep_id)
 
-    # ── Plot dir per sweep ────────────────────────────────────────────────
-    plot_dir = SCRIPTS_DIR / "plots" / args.sweep_id
+    # ── Plot dir: data/inr/<sweep_id>/<dataset>/<timestamp>/ ────────────────
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    plot_dir = SCRIPTS_DIR / "data" / "inr" / args.sweep_id / ds_cfg["key"] / timestamp
     plot_dir.mkdir(parents=True, exist_ok=True)
 
     # ── Sample indices ────────────────────────────────────────────────────
@@ -749,9 +749,22 @@ def main():
     elif args.report_plots and not has_gt:
         log.warning("  --report_plots requires ground truth — skipping (no GT in dataset)")
 
-    # ── Registry ──────────────────────────────────────────────────────────
+    # ── Save results.json ────────────────────────────────────────────────
     slim_results = [{k: v for k, v in r.items() if k != "per_sample"}
                     for r in all_results]
+    results_json = {
+        "timestamp": timestamp,
+        "dataset": ds_cfg["key"],
+        "sweep_id": args.sweep_id,
+        "n_samples": len(indices),
+        "indices": indices,
+        "methods": {r["method"]: r for r in slim_results},
+    }
+    with open(plot_dir / "results.json", "w") as f:
+        json.dump(results_json, f, indent=2)
+    log.info(f"  Results JSON -> {plot_dir / 'results.json'}")
+
+    # ── Registry ──────────────────────────────────────────────────────────
     for e in registry:
         if e["sweep_id"].startswith(args.sweep_id):
             e["reconstruction"] = {

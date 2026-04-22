@@ -259,11 +259,36 @@ def plot_method_grid(
         global_vmax = 1600.0
         norm_sos = mcolors.Normalize(vmin=global_vmin, vmax=global_vmax)
 
+        # ── Build short labels for the legend ────────────────────────────
+        # Map each method to a compact letter/number tag for the row label
+        _ALL_LABELS = ["GT"] + list(results.keys())
+        _SHORT = {}
+        _SHORT["GT"] = "GT"
+        inr_letter = 0
+        for label in results.keys():
+            if label in _BASELINE_LABELS:
+                _SHORT[label] = label          # "L1", "L2" are already short
+            else:
+                _SHORT[label] = chr(ord("A") + inr_letter)  # A, B, C, ...
+                inr_letter += 1
+
         # ── Figure layout ────────────────────────────────────────────────
         # Extra column on the right for the colorbar
         cell_h  = figwidth / n_cols          # keep cells roughly square
         fig_h   = cell_h * n_rows + 0.6      # +0.6 for column header row
         cb_frac = 0.03                       # colorbar width fraction of figure
+
+        # Reserve space at the bottom for the legend.
+        # The legend box height is roughly 0.45 in for one legend row and
+        # grows by ~0.18 in per additional row.  Estimate rows from ncol.
+        _ncol_legend  = min(len(results), 4)
+        _nrow_legend  = int(np.ceil(len(results) / _ncol_legend))
+        _legend_h_in  = 0.30 + 0.18 * _nrow_legend   # empirical
+        # Add a small gap between the legend top and the last image row.
+        _gap_in       = 0.10
+        _bottom_frac  = (_legend_h_in + _gap_in) / fig_h
+        # Clamp: never eat more than 14% of the figure height
+        _bottom_frac  = max(0.06, min(0.14, _bottom_frac))
 
         fig = plt.figure(figsize=(figwidth, fig_h))
         fig.patch.set_facecolor("white")
@@ -276,10 +301,10 @@ def plot_method_grid(
             width_ratios=[1.0] * n_cols + [cb_frac * n_cols],
             hspace=0.04,
             wspace=0.03,
-            left=0.12,    # room for row labels
+            left=0.06,    # tighter left margin — short labels only
             right=0.95,
             top=0.93,
-            bottom=0.02,
+            bottom=_bottom_frac,  # reserved for the legend below the last row
         )
 
         image_axes: list[list[plt.Axes]] = []
@@ -307,7 +332,7 @@ def plot_method_grid(
 
         # Row label: "GT"
         gt_row_axes[0].set_ylabel("GT", fontsize=9, rotation=0,
-                                   labelpad=28, va="center")
+                                   labelpad=14, va="center")
 
         # ── Method rows ──────────────────────────────────────────────────
         for row_offset, (method_label, per_sample) in enumerate(results.items()):
@@ -339,11 +364,44 @@ def plot_method_grid(
 
             image_axes.append(method_row_axes)
 
-            # Row label on the leftmost cell
+            # Row label on the leftmost cell — short tag only
             method_row_axes[0].set_ylabel(
-                method_label, fontsize=8, rotation=0,
-                labelpad=28, va="center",
+                _SHORT[method_label], fontsize=9, rotation=0,
+                labelpad=14, va="center",
             )
+
+        # ── Legend mapping short tags to full method names ────────────────
+        from matplotlib.patches import Patch
+        inr_idx = 0
+        legend_handles = []
+        for label in results.keys():
+            if label in _BASELINE_LABELS:
+                c = "#888888"
+            else:
+                c = _WONG[1 + inr_idx % (len(_WONG) - 1)]
+                inr_idx += 1
+            legend_handles.append(
+                Patch(facecolor=c, alpha=0.65, edgecolor="grey",
+                      linewidth=0.4, label=f"{_SHORT[label]}: {label}")
+            )
+        # Place the legend in the reserved bottom strip.
+        # bbox_to_anchor uses figure-fraction coordinates.
+        # loc="lower center" anchors the legend's bottom-centre to the point,
+        # so setting y to a small positive value keeps the box off the figure
+        # edge while remaining entirely below the GridSpec (at _bottom_frac).
+        fig.legend(
+            handles=legend_handles,
+            loc="lower center",
+            ncol=min(len(legend_handles), 4),
+            bbox_to_anchor=(0.5, 0.005),
+            fontsize=7,
+            frameon=True,
+            framealpha=0.9,
+            edgecolor="lightgrey",
+            handlelength=1.0,
+            handletextpad=0.4,
+            columnspacing=0.8,
+        )
 
         # ── Shared colorbar ──────────────────────────────────────────────
         # Span all image rows in the last GridSpec column
@@ -487,9 +545,17 @@ def plot_metrics_comparison(
                 patch.set_facecolor(method_colors[label])
                 patch.set_alpha(0.65)
 
-            # Axis styling
+            # Axis styling — use short numbered labels to avoid crowding
+            short_labels = []
+            inr_num = 0
+            for label in method_names:
+                if label in _BASELINE_LABELS:
+                    short_labels.append(label)
+                else:
+                    inr_num += 1
+                    short_labels.append(str(inr_num))
             ax.set_xticks(x_pos)
-            ax.set_xticklabels(method_names, rotation=35, ha="right",
+            ax.set_xticklabels(short_labels, rotation=0, ha="center",
                                fontsize=7)
             # Title carries metric name + unit; no y-axis label
             unit = _units.get(metric_key, "")
@@ -508,30 +574,35 @@ def plot_metrics_comparison(
             ax.grid(axis="y", linewidth=0.4, linestyle="--", alpha=0.5,
                     zorder=0)
 
-        # ── Legend ───────────────────────────────────────────────────────
-        # Build a compact legend from coloured patches, appended to the
-        # last axes so it does not interfere with data area.
+        # ── Legend with number→name mapping ─────────────────────────────
         from matplotlib.patches import Patch
-        legend_handles = [
-            Patch(facecolor=method_colors[lbl], alpha=0.65,
-                  edgecolor="grey", linewidth=0.4, label=lbl)
-            for lbl in method_names
-        ]
+        legend_handles = []
+        num_idx = 0
+        for lbl in method_names:
+            if lbl in _BASELINE_LABELS:
+                tag = lbl
+            else:
+                num_idx += 1
+                tag = f"{num_idx}: {lbl}"
+            legend_handles.append(
+                Patch(facecolor=method_colors[lbl], alpha=0.65,
+                      edgecolor="grey", linewidth=0.4, label=tag)
+            )
         fig.legend(
             handles=legend_handles,
             loc="lower center",
-            ncol=min(n_methods, 5),
+            ncol=min(n_methods, 4),
             bbox_to_anchor=(0.5, -0.08),
-            fontsize=7,
+            fontsize=6.5,
             frameon=True,
             framealpha=0.9,
             edgecolor="lightgrey",
-            handlelength=1.4,
-            handletextpad=0.5,
-            columnspacing=1.0,
+            handlelength=1.0,
+            handletextpad=0.4,
+            columnspacing=0.8,
         )
 
-        fig.tight_layout(rect=[0, 0.05, 1, 1])
+        fig.tight_layout(rect=[0, 0.08, 1, 1])
 
         if save_path:
             _save(fig, save_path, png_fallback=png_fallback)

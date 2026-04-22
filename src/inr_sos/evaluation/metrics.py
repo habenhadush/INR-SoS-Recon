@@ -89,6 +89,49 @@ def compute_model_error_floor(sample, L_matrix, time_scale=1e6):
     }
 
 
+def compute_roi_masks(gt_img):
+    """Otsu-based ROI mask from GT. Returns (roi_mask, bkg_mask) or (None, None)."""
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        try:
+            thresh = threshold_otsu(gt_img)
+            roi_mask = gt_img > thresh
+            bkg_mask = ~roi_mask
+        except ValueError:
+            return None, None
+    if not roi_mask.any() or not bkg_mask.any():
+        return None, None
+    return roi_mask, bkg_mask
+
+
+def composite_mae(mae_mean: float, mae_roi: float, roi_weight: float) -> float:
+    """Blend ROI and overall MAE.
+
+    roi_weight=1.0 → pure MAE_roi; roi_weight=0.0 → pure MAE_mean.
+    Intermediate values, e.g. 0.7 → 70% MAE_roi + 30% MAE_mean.
+    """
+    w = float(np.clip(roi_weight, 0.0, 1.0))
+    return w * float(mae_roi) + (1.0 - w) * float(mae_mean)
+
+
+def compute_sweep_objective(
+    metrics: dict, roi_weight: float, contrast_weight: float = 0.0,
+) -> float:
+    """Sweep objective that optionally penalises low contrast recovery.
+
+    Base: roi_weight blend of MAE_roi and MAE_mean (same as composite_mae).
+    When contrast_weight > 0, the base is multiplied by
+        (1 + contrast_weight * (1 - CR_clamped))
+    so zero contrast doubles the objective (at cw=1) while perfect contrast
+    leaves it unchanged.
+    """
+    base = composite_mae(metrics["MAE"], metrics["MAE_roi"], roi_weight)
+    if contrast_weight > 0:
+        cr = max(0.0, min(float(metrics["contrast_recovery"]), 1.0))
+        base *= (1.0 + contrast_weight * (1.0 - cr))
+    return float(base)
+
+
 def calculate_cnr(s_phys_pred, s_gt_raw):
     """
     Calculates the Contrast-to-Noise Ratio (CNR).
@@ -251,9 +294,25 @@ def calculate_metrics(s_phys_pred, s_gt_raw, grid_shape=(64, 64)):
     # CNR
     cnr = calculate_cnr(pred_img, gt_img)
 
+    # ROI-aware breakdown (Otsu mask from GT)
+    roi_mask, bkg_mask = compute_roi_masks(gt_img)
+    if roi_mask is not None:
+        mae_roi = float(np.mean(np.abs(pred_img[roi_mask] - gt_img[roi_mask])))
+        mae_bkg = float(np.mean(np.abs(pred_img[bkg_mask] - gt_img[bkg_mask])))
+        gt_contrast   = float(gt_img[roi_mask].mean()   - gt_img[bkg_mask].mean())
+        pred_contrast = float(pred_img[roi_mask].mean() - pred_img[bkg_mask].mean())
+        contrast_recovery = (pred_contrast / gt_contrast) if abs(gt_contrast) > 1e-6 else 0.0
+    else:
+        mae_roi = mae
+        mae_bkg = mae
+        contrast_recovery = 0.0
+
     return {
         "MAE":  mae,
         "RMSE": rmse,
         "SSIM": ssim_val,
         "CNR":  cnr,
+        "MAE_roi": mae_roi,
+        "MAE_bkg": mae_bkg,
+        "contrast_recovery": float(contrast_recovery),
     }
