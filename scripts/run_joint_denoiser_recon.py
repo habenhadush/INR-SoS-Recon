@@ -4,7 +4,7 @@ run_joint_denoiser_recon.py
 ---------------------------
 Experiment 11: Joint denoiser + reconstructor (staged training).
 
-Compares: L1 | L2 | Raw INR | Joint (staged, with adaptive λ strategies)
+Compares: L1 | L2 | Plain INR | Joint (staged, with adaptive λ strategies)
 
 Usage:
     # Fixed λ (default)
@@ -151,13 +151,18 @@ def build_recon_model(cfg):
     )
 
 
-def fetch_topk_joint_configs(sweep_id, top_k, logger):
-    """Fetch top-k configs from a joint W&B sweep, sorted by MAE_mean.
+def fetch_topk_joint_configs(sweep_id, top_k, logger,
+                             selection_metric="loss", mixed_split=None):
+    """Fetch top-k configs from a joint W&B sweep.
 
-    Returns list of dicts, each with keys needed by optimize_joint:
-      rank, label, denoise_cfg, recon_cfg_overrides, lambda_strategy,
-      lambda_fit, lambda_cfg, pretrain_dn_steps, pretrain_rc_steps,
-      joint_steps, joint_lr_factor.
+    selection_metric controls sweep-level ranking:
+      - "loss"    : sort by MAE_mean ascending (legacy behaviour).
+      - "mae_roi" : sort by MAE_roi_mean ascending.
+      - "cnr"     : sort by CNR_mean descending.
+      - "mixed"   : n by MAE_roi + m by CNR, deduped with fill-up.
+                    mixed_split must be a (n, m) tuple with n+m == top_k.
+
+    Labels are prefixed with the selection source: rank, roi, or cnr.
     """
     import wandb as wb
 
@@ -172,15 +177,86 @@ def fetch_topk_joint_configs(sweep_id, top_k, logger):
     if entry is None:
         raise ValueError(f"Sweep ID '{sweep_id}' not found in {REGISTRY_FILE}")
 
-    logger.info(f"  Fetching top-{top_k} from joint sweep {entry['sweep_id']}")
+    logger.info(f"  Fetching top-{top_k} from joint sweep {entry['sweep_id']} "
+                f"(selection_metric={selection_metric})")
 
     api = wb.Api()
     sweep = api.sweep(f"{entry['entity']}/{entry['project']}/{entry['sweep_id']}")
-    completed = sorted(
-        [r for r in sweep.runs if "MAE_mean" in r.summary],
-        key=lambda r: r.summary["MAE_mean"],
-    )
-    selected = completed[:top_k]
+    all_runs = list(sweep.runs)
+
+    def _by_mae_roi(rs):
+        have = [r for r in rs if "MAE_roi_mean" in r.summary]
+        if not have:
+            have = [r for r in rs if "MAE_mean" in r.summary]
+            logger.warning("  MAE_roi_mean not in sweep summary — falling back to MAE_mean")
+            return sorted(have, key=lambda r: r.summary["MAE_mean"])
+        return sorted(have, key=lambda r: r.summary["MAE_roi_mean"])
+
+    def _by_cnr(rs):
+        have = [r for r in rs if "CNR_mean" in r.summary]
+        return sorted(have, key=lambda r: -r.summary["CNR_mean"])
+
+    def _by_mae_mean(rs):
+        have = [r for r in rs if "MAE_mean" in r.summary]
+        return sorted(have, key=lambda r: r.summary["MAE_mean"])
+
+    # Build (run, source_tag) list honouring the requested selection_metric
+    pairs: list[tuple] = []
+    if selection_metric == "mae_roi":
+        pairs = [(r, "roi") for r in _by_mae_roi(all_runs)[:top_k]]
+    elif selection_metric == "cnr":
+        pairs = [(r, "cnr") for r in _by_cnr(all_runs)[:top_k]]
+    elif selection_metric == "mixed":
+        if mixed_split is None:
+            raise ValueError("--selection_metric mixed requires --mixed_split n,m")
+        n, m = mixed_split
+        if n + m != top_k:
+            raise ValueError(f"mixed_split {n}+{m}={n+m} must equal top_k={top_k}")
+        roi_ranked = _by_mae_roi(all_runs)
+        cnr_ranked = _by_cnr(all_runs)
+        picked_ids: set = set()
+        pairs_roi: list[tuple] = []
+        pairs_cnr: list[tuple] = []
+        # First pass: take top-n from MAE_roi, top-m from CNR (deduped)
+        for r in roi_ranked:
+            if len(pairs_roi) >= n:
+                break
+            if r.id not in picked_ids:
+                pairs_roi.append((r, "roi"))
+                picked_ids.add(r.id)
+        for r in cnr_ranked:
+            if len(pairs_cnr) >= m:
+                break
+            if r.id not in picked_ids:
+                pairs_cnr.append((r, "cnr"))
+                picked_ids.add(r.id)
+        # Fill-up pass: if dedupe shrank either list, pull next-best from each
+        roi_iter = iter(roi_ranked)
+        cnr_iter = iter(cnr_ranked)
+        while len(pairs_roi) < n:
+            try:
+                r = next(roi_iter)
+            except StopIteration:
+                break
+            if r.id not in picked_ids:
+                pairs_roi.append((r, "roi"))
+                picked_ids.add(r.id)
+        while len(pairs_cnr) < m:
+            try:
+                r = next(cnr_iter)
+            except StopIteration:
+                break
+            if r.id not in picked_ids:
+                pairs_cnr.append((r, "cnr"))
+                picked_ids.add(r.id)
+        pairs = pairs_roi + pairs_cnr
+        logger.info(f"  mixed({n},{m}): {len(pairs_roi)} from MAE_roi, "
+                    f"{len(pairs_cnr)} from CNR (total {len(pairs)})")
+    else:  # "loss" — legacy
+        pairs = [(r, "rank") for r in _by_mae_mean(all_runs)[:top_k]]
+
+    if not pairs:
+        raise RuntimeError(f"No completed runs found in sweep {entry['sweep_id']}")
 
     def _g(key, default, cast=float):
         """Safely read a value from W&B config — handles param spec dicts."""
@@ -190,8 +266,12 @@ def fetch_topk_joint_configs(sweep_id, top_k, logger):
         return cast(val)
 
     configs = []
-    for rank, run in enumerate(selected, 1):
+    # Per-source counters so labels read "roi1", "roi2", "cnr1", "cnr2" or "rank1"...
+    src_counter: dict = {}
+    for abs_rank, (run, src) in enumerate(pairs, 1):
         sc = run.config
+        src_counter[src] = src_counter.get(src, 0) + 1
+        local_rank = src_counter[src]
 
         # Denoiser config
         dn_cfg = dict(DEFAULT_DENOISE_CFG)
@@ -238,13 +318,19 @@ def fetch_topk_joint_configs(sweep_id, top_k, logger):
         j_lr_factor = _g("joint_lr_factor", 0.1, float)
 
         sweep_mae = run.summary.get("MAE_mean", float("inf"))
+        sweep_mae_roi = run.summary.get("MAE_roi_mean", float("inf"))
         sweep_cnr = run.summary.get("CNR_mean", 0.0)
 
-        short = f"rank{rank}_{rc_model_type}_{lam_strategy}"
-        logger.info(f"  #{rank}: {short}  sweep_MAE={sweep_mae:.2f}  sweep_CNR={sweep_cnr:.3f}")
+        short = f"{src}{local_rank}_{rc_model_type}_{lam_strategy}"
+        logger.info(f"  #{abs_rank} [{src}]: {short}  "
+                    f"sweep_MAE={sweep_mae:.2f}  "
+                    f"MAE_roi={sweep_mae_roi:.2f}  "
+                    f"CNR={sweep_cnr:.3f}")
 
         configs.append({
-            "rank": rank,
+            "rank": abs_rank,
+            "source": src,
+            "local_rank": local_rank,
             "label": short,
             "denoise_cfg": dn_cfg,
             "rc_overrides": rc_overrides,
@@ -256,6 +342,7 @@ def fetch_topk_joint_configs(sweep_id, top_k, logger):
             "joint_steps": j_steps,
             "joint_lr_factor": j_lr_factor,
             "sweep_mae": sweep_mae,
+            "sweep_mae_roi": sweep_mae_roi,
             "sweep_cnr": sweep_cnr,
             "raw_config": {k: v for k, v in sc.items() if k != "_wandb"},
         })
@@ -384,7 +471,7 @@ def plot_summary_bars(all_results, out_dir):
 
     x = np.arange(len(methods))
     colors = ["#999999" if m in ("L1", "L2") else
-              "#2ca02c" if m == "Raw INR" else
+              "#2ca02c" if m == "Plain INR" else
               "#1f77b4" for m in methods]
 
     ax1.bar(x, mae_means, yerr=mae_stds, color=colors, capsize=4,
@@ -459,12 +546,41 @@ def main():
     parser.add_argument("--top_k", type=int, default=None,
                         help="Fetch top-k configs from --sweep_id and run each one. "
                              "Overrides manual lambda/denoiser/recon config.")
-    parser.add_argument("--selection_metric", default="loss", choices=["loss", "mae_roi"],
-                        help="Model checkpoint criterion in Stage 3 (default: loss)")
+    parser.add_argument(
+        "--selection_metric", default="loss",
+        choices=["loss", "mae_roi", "cnr", "mixed"],
+        help="Sweep-level ranking criterion for --top_k fetch. "
+             "'loss' sorts by MAE_mean (legacy), 'mae_roi' by MAE_roi_mean asc, "
+             "'cnr' by CNR_mean desc, 'mixed' combines n MAE_roi + m CNR picks "
+             "(requires --mixed_split). Also controls Stage 3c checkpoint criterion: "
+             "'mae_roi' (or 'cnr'/'mixed') use oracle MAE_roi selection; 'loss' uses training loss.",
+    )
+    parser.add_argument(
+        "--mixed_split", default=None,
+        help="For --selection_metric mixed: 'n,m' where n+m==top_k. "
+             "n configs ranked by MAE_roi, m by CNR (deduped, filled).",
+    )
     args = parser.parse_args()
 
+    # Parse --mixed_split if present
+    mixed_split = None
+    if args.selection_metric == "mixed":
+        if not args.mixed_split:
+            parser.error("--selection_metric mixed requires --mixed_split n,m")
+        try:
+            n_str, m_str = args.mixed_split.split(",")
+            mixed_split = (int(n_str), int(m_str))
+        except ValueError:
+            parser.error(f"--mixed_split must be 'n,m' (got '{args.mixed_split}')")
+        if args.top_k is None or sum(mixed_split) != args.top_k:
+            parser.error(f"--mixed_split {mixed_split} must sum to --top_k ({args.top_k})")
+
+    # Stage 3c checkpoint criterion: any GT-aware sweep ranking uses mae_roi oracle
+    stage3c_metric = "mae_roi" if args.selection_metric in ("mae_roi", "cnr", "mixed") else "loss"
+
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    run_dir = OUTPUT_DIR / args.dataset / timestamp
+    folder_name = f"{timestamp}_{args.sweep_id}" if args.sweep_id else timestamp
+    run_dir = OUTPUT_DIR / args.dataset / folder_name
     run_dir.mkdir(parents=True, exist_ok=True)
 
     denoise_cfg = dict(DEFAULT_DENOISE_CFG)
@@ -546,18 +662,20 @@ def main():
                 m = calculate_metrics(sample[key], sample["s_gt_raw"])
                 all_results[label].append({"metrics": m, "s_phys": sample[key]})
 
-    # Raw INR baseline
-    log.info("\n── Raw INR baseline ──")
-    all_results["Raw INR"] = []
+    # Plain INR baseline — single ReluMLP fit on raw k-wave measurements
+    # (no denoiser, no staged curriculum). Reference point for how a bare
+    # INR fit performs on mismatched data; labelled as a baseline in figures.
+    log.info("\n── Plain INR baseline ──")
+    all_results["Plain INR"] = []
     for i, (idx, sample) in enumerate(zip(indices, samples)):
-        log.info(f"  Raw INR: sample {i+1}/{len(indices)} (idx={idx})")
+        log.info(f"  Plain INR: sample {i+1}/{len(indices)} (idx={idx})")
         model = build_recon_model(recon_cfg)
         res = optimize_full_forward_operator(
             sample=sample, L_matrix=dataset.L_matrix, model=model,
-            label="ReluMLP_raw", config=copy.deepcopy(recon_cfg), use_wandb=False,
+            label="ReluMLP_plain", config=copy.deepcopy(recon_cfg), use_wandb=False,
         )
         m = calculate_metrics(res["s_phys"], sample["s_gt_raw"])
-        all_results["Raw INR"].append({
+        all_results["Plain INR"].append({
             "metrics": m, "s_phys": res["s_phys"],
             "loss_history": res["loss_history"],
         })
@@ -566,7 +684,11 @@ def main():
     if args.top_k and args.sweep_id:
         # ── Top-K from sweep: fetch configs from W&B ────────────────────
         log.info(f"\n── Top-{args.top_k} configs from joint sweep {args.sweep_id} ──")
-        topk_configs = fetch_topk_joint_configs(args.sweep_id, args.top_k, log)
+        topk_configs = fetch_topk_joint_configs(
+            args.sweep_id, args.top_k, log,
+            selection_metric=args.selection_metric,
+            mixed_split=mixed_split,
+        )
 
         for cfg_entry in topk_configs:
             method_label = cfg_entry["label"]
@@ -606,15 +728,15 @@ def main():
                     joint_lr_factor=cfg_entry["joint_lr_factor"],
                     use_wandb=False,
                     label=method_label,
-                    selection_metric=args.selection_metric,
-                    gt_for_selection=sample["s_gt_raw"] if args.selection_metric == "mae_roi" else None,
+                    selection_metric=stage3c_metric,
+                    gt_for_selection=sample["s_gt_raw"] if stage3c_metric == "mae_roi" else None,
                 )
                 elapsed = time.perf_counter() - t0
                 m = calculate_metrics(res["s_phys"], sample["s_gt_raw"])
                 m["time_s"] = elapsed
 
-                raw_m = all_results["Raw INR"][i]["metrics"]
-                log.info(f"    Raw MAE={raw_m['MAE']:.1f} → Joint MAE={m['MAE']:.1f}")
+                raw_m = all_results["Plain INR"][i]["metrics"]
+                log.info(f"    Plain MAE={raw_m['MAE']:.1f} → Joint MAE={m['MAE']:.1f}")
 
                 all_results[method_label].append({
                     "metrics": m, "s_phys": res["s_phys"],
@@ -677,15 +799,15 @@ def main():
                     joint_steps=args.joint_steps,
                     use_wandb=False,
                     label=method_label,
-                    selection_metric=args.selection_metric,
-                    gt_for_selection=sample["s_gt_raw"] if args.selection_metric == "mae_roi" else None,
+                    selection_metric=stage3c_metric,
+                    gt_for_selection=sample["s_gt_raw"] if stage3c_metric == "mae_roi" else None,
                 )
                 elapsed = time.perf_counter() - t0
                 m = calculate_metrics(res["s_phys"], sample["s_gt_raw"])
                 m["time_s"] = elapsed
 
-                raw_m = all_results["Raw INR"][i]["metrics"]
-                log.info(f"    Raw MAE={raw_m['MAE']:.1f} → Joint MAE={m['MAE']:.1f}")
+                raw_m = all_results["Plain INR"][i]["metrics"]
+                log.info(f"    Plain MAE={raw_m['MAE']:.1f} → Joint MAE={m['MAE']:.1f}")
 
                 all_results[method_label].append({
                     "metrics": m, "s_phys": res["s_phys"],
@@ -719,11 +841,14 @@ def main():
 
     # ── Thesis-quality report figures (optional, staged results only) ────
     if args.report_plots:
-        _baselines = {"L1", "L2", "Raw INR"}
+        _baselines = {"L1", "L2", "Plain INR", "Raw INR"}  # "Raw INR" kept for back-compat
+        _topk_prefixes = ("rank", "roi", "cnr")
         report_results = {
             method: per_sample
             for method, per_sample in all_results.items()
-            if method in _baselines or method.startswith("Joint") or method.startswith("rank")
+            if method in _baselines
+            or method.startswith("Joint")
+            or method.startswith(_topk_prefixes)
         }
         if not any(m not in _baselines for m in report_results):
             log.warning("  No joint results to plot — skipping report figures")

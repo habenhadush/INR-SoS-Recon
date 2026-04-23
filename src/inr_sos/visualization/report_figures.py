@@ -93,8 +93,10 @@ _WONG = [
     "#CC79A7",  # reddish purple
 ]
 
-# Baseline methods drawn grey; INR methods drawn blue/teal
-_BASELINE_LABELS = {"L1", "L2"}
+# Baseline methods drawn grey; INR methods drawn blue/teal.
+# "Plain INR" is the bare ReluMLP fit (no denoiser / no staged curriculum);
+# "Raw INR" kept for back-compat with results.json files written pre-rename.
+_BASELINE_LABELS = {"L1", "L2", "Plain INR", "Raw INR"}
 
 # Roman numerals for column headers (up to 20 samples)
 _ROMAN = [
@@ -545,15 +547,16 @@ def plot_metrics_comparison(
                 patch.set_facecolor(method_colors[label])
                 patch.set_alpha(0.65)
 
-            # Axis styling — use short numbered labels to avoid crowding
+            # Axis styling — letter tags for INR methods (A, B, …) to match
+            # the grid plot. Baselines keep their full label.
             short_labels = []
-            inr_num = 0
+            inr_letter = 0
             for label in method_names:
                 if label in _BASELINE_LABELS:
                     short_labels.append(label)
                 else:
-                    inr_num += 1
-                    short_labels.append(str(inr_num))
+                    short_labels.append(chr(ord("A") + inr_letter))
+                    inr_letter += 1
             ax.set_xticks(x_pos)
             ax.set_xticklabels(short_labels, rotation=0, ha="center",
                                fontsize=7)
@@ -574,16 +577,16 @@ def plot_metrics_comparison(
             ax.grid(axis="y", linewidth=0.4, linestyle="--", alpha=0.5,
                     zorder=0)
 
-        # ── Legend with number→name mapping ─────────────────────────────
+        # ── Legend with letter→name mapping (matches grid plot) ─────────
         from matplotlib.patches import Patch
         legend_handles = []
-        num_idx = 0
+        letter_idx = 0
         for lbl in method_names:
             if lbl in _BASELINE_LABELS:
                 tag = lbl
             else:
-                num_idx += 1
-                tag = f"{num_idx}: {lbl}"
+                tag = f"{chr(ord('A') + letter_idx)}: {lbl}"
+                letter_idx += 1
             legend_handles.append(
                 Patch(facecolor=method_colors[lbl], alpha=0.65,
                       edgecolor="grey", linewidth=0.4, label=tag)
