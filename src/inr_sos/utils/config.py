@@ -42,6 +42,9 @@ class ExperimentConfig:
     patience: int = 100             # stop if no val improvement for this many steps
     val_fraction: float = 0.1       # fraction of valid rays held out for validation
 
+    # --- Diagnostic / Oracle ---
+    oracle_mode: bool = False       # If True, bypass forward model (direct GT supervision)
+
     def to_dict(self) -> dict:
         """Required for passing the config to wandb.init()"""
         return asdict(self)

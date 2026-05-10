@@ -58,6 +58,7 @@ from inr_sos.training.engines import (
     optimize_full_forward_operator,
     optimize_sequential_views,
     optimize_stochastic_ray_batching,
+    optimize_direct_supervision,
 )
 from inr_sos.visualization.report_figures import (
     plot_method_grid,
@@ -70,9 +71,10 @@ LOG_DIR       = SCRIPTS_DIR / "logs"
 LOG_DIR.mkdir(exist_ok=True)
 
 ENGINE_MAP = {
-    "Full_Matrix":    optimize_full_forward_operator,
-    "Sequential_SGD": optimize_sequential_views,
-    "Ray_Batching":   optimize_stochastic_ray_batching,
+    "Full_Matrix":       optimize_full_forward_operator,
+    "Sequential_SGD":    optimize_sequential_views,
+    "Ray_Batching":      optimize_stochastic_ray_batching,
+    "Direct_Supervision": optimize_direct_supervision,
 }
 MODEL_MAP = {
     "FourierMLP": FourierMLP,
@@ -169,6 +171,11 @@ def run_inr_config(sweep_cfg, dataset, indices, base_config, run_tag, log,
 
     # Use 'PI' for legacy 'INR' label in reports
     display_method = "PI" if method == "INR" else method
+
+    # Oracle mode override
+    if getattr(base_config, "oracle_mode", False):
+        method = "Direct_Supervision"
+        display_method = "Oracle"
 
     label   = f"{display_method} / {mtype}"
     wb_name = f"{run_tag}_rank{rank}_{method}_{mtype}"
@@ -542,6 +549,8 @@ def main():
     parser.add_argument("--job_name", default=None)
     parser.add_argument("--tag", default=None,
                         help="Optional tag to append to the result directory name.")
+    parser.add_argument("--oracle", action="store_true",
+                        help="Run in supervised 'oracle' mode (direct GT capacity test).")
     parser.add_argument("--report_plots", action="store_true",
                         help="Generate thesis-quality comparison figures (SVG + PNG).")
     parser.add_argument("--no_exclude_sweep_samples", action="store_true",
@@ -602,13 +611,19 @@ def main():
     init_tag = "warm" if args.warm_init else "cold"
     sel_tag  = (f"top{args.top_k_per_model}permodel"
                 if args.top_k_per_model else f"topk{args.top_k}")
-    run_tag  = make_run_tag(f"recon_{sel_tag}_fresh{n_samples}_{init_tag}",
-                            args.sweep_id)
+    
+    desc = f"recon_{sel_tag}_fresh{n_samples}_{init_tag}"
+    if args.oracle:
+        desc = "oracle_" + desc
+        
+    run_tag  = make_run_tag(desc, args.sweep_id)
     wb_group = args.job_name or run_tag
     log_path, log = setup_logging(run_tag)
 
     log.info("=" * 70)
     log.info(f"  Reconstruction  |  {run_tag}")
+    if args.oracle:
+        log.info("  MODE: SUPERVISED ORACLE (Direct GT)")
     log.info(f"  Sweep    : {args.sweep_id}")
     log.info(f"  Dataset  : {ds_cfg['name']}  ({ds_cfg['key']})")
     log.info(f"  GT       : {'yes' if has_gt else 'NO — reconstruction only'}")
@@ -657,6 +672,7 @@ def main():
         project_name=entry["project"],
         time_scale=resolved_ts,
     )
+    base_config.oracle_mode = args.oracle
 
     # ── Fetch configs from W&B ────────────────────────────────────────────
     api   = wandb.Api()
