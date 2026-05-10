@@ -537,6 +537,8 @@ def main():
         help="Do NOT exclude sweep indices from the evaluation pool "
              "(default: sweep + validation indices are excluded).",
     )
+    parser.add_argument("--tag", default=None,
+                        help="Optional tag to append to the result directory name.")
     parser.add_argument(
         "--sweep_id",
         default=None,
@@ -579,7 +581,11 @@ def main():
     stage3c_metric = "mae_roi" if args.selection_metric in ("mae_roi", "cnr", "mixed") else "loss"
 
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    folder_name = f"{timestamp}_{args.sweep_id}" if args.sweep_id else timestamp
+    folder_name = timestamp
+    if args.sweep_id:
+        folder_name += f"_{args.sweep_id}"
+    if args.tag:
+        folder_name += f"_{args.tag}"
     run_dir = OUTPUT_DIR / args.dataset / folder_name
     run_dir.mkdir(parents=True, exist_ok=True)
 

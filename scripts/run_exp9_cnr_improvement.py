@@ -347,6 +347,8 @@ def main():
                         help="Number of samples to visualize")
     parser.add_argument("--report_plots", action="store_true",
                         help="Generate thesis-quality comparison figures (SVG + PNG).")
+    parser.add_argument("--tag", default=None,
+                        help="Optional tag to append to the result directory name.")
     parser.add_argument(
         "--no_exclude_sweep_samples",
         action="store_true",
@@ -364,7 +366,8 @@ def main():
 
     # ── Setup ─────────────────────────────────────────────────────────────
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    run_dir = OUTPUT_DIR / args.dataset / timestamp
+    dir_name = f"{timestamp}_{args.tag}" if args.tag else timestamp
+    run_dir = OUTPUT_DIR / args.dataset / dir_name
     run_dir.mkdir(parents=True, exist_ok=True)
 
     log.info("=" * 70)

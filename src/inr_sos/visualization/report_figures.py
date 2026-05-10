@@ -268,8 +268,18 @@ def plot_method_grid(
         _SHORT["GT"] = "GT"
         inr_letter = 0
         for label in results.keys():
-            if label in _BASELINE_LABELS:
-                _SHORT[label] = label          # "L1", "L2" are already short
+            # Check if label is a baseline or contains a baseline tag
+            is_baseline = any(b == label or (b in label and b in {"PI", "Plain INR", "Raw INR"})
+                              for b in _BASELINE_LABELS)
+            if is_baseline:
+                if "PI" in label or "Plain INR" in label:
+                    _SHORT[label] = "PI"
+                elif "L1" in label:
+                    _SHORT[label] = "L1"
+                elif "L2" in label:
+                    _SHORT[label] = "L2"
+                else:
+                    _SHORT[label] = label
             else:
                 _SHORT[label] = chr(ord("A") + inr_letter)  # A, B, C, ...
                 inr_letter += 1
@@ -377,14 +387,11 @@ def plot_method_grid(
         inr_idx = 0
         legend_handles = []
         for label in results.keys():
-            if label in _BASELINE_LABELS:
+            is_baseline = any(b == label or (b in label and b in {"PI", "Plain INR", "Raw INR"})
+                              for b in _BASELINE_LABELS)
+            if is_baseline:
                 c = "#888888"
-                # Simplify legend: if label is PI or Plain INR, use PI.
-                # If L1/L2, just use L1/L2.
-                if label in {"PI", "Plain INR"}:
-                    legend_label = "PI"
-                else:
-                    legend_label = label
+                legend_label = _SHORT[label]
             else:
                 c = _WONG[1 + inr_idx % (len(_WONG) - 1)]
                 inr_idx += 1
@@ -502,7 +509,9 @@ def plot_metrics_comparison(
     method_linestyles = {}
     inr_idx = 0
     for label in method_names:
-        if label in _BASELINE_LABELS:
+        is_baseline = any(b == label or (b in label and b in {"PI", "Plain INR", "Raw INR"})
+                          for b in _BASELINE_LABELS)
+        if is_baseline:
             method_colors[label]     = "#888888"
             method_linestyles[label] = "--"
         else:
@@ -560,8 +569,17 @@ def plot_metrics_comparison(
             short_labels = []
             inr_letter = 0
             for label in method_names:
-                if label in _BASELINE_LABELS:
-                    short_labels.append(label)
+                is_baseline = any(b == label or (b in label and b in {"PI", "Plain INR", "Raw INR"})
+                                  for b in _BASELINE_LABELS)
+                if is_baseline:
+                    if "PI" in label or "Plain INR" in label:
+                        short_labels.append("PI")
+                    elif "L1" in label:
+                        short_labels.append("L1")
+                    elif "L2" in label:
+                        short_labels.append("L2")
+                    else:
+                        short_labels.append(label)
                 else:
                     short_labels.append(chr(ord("A") + inr_letter))
                     inr_letter += 1
@@ -590,12 +608,11 @@ def plot_metrics_comparison(
         legend_handles = []
         letter_idx = 0
         for lbl in method_names:
-            if lbl in _BASELINE_LABELS:
+            is_baseline = any(b == lbl or (b in lbl and b in {"PI", "Plain INR", "Raw INR"})
+                              for b in _BASELINE_LABELS)
+            if is_baseline:
                 c = method_colors[lbl]
-                if lbl in {"PI", "Plain INR"}:
-                    tag = "PI"
-                else:
-                    tag = lbl
+                tag = short_labels[method_names.index(lbl)]
             else:
                 c = method_colors[lbl]
                 tag = f"{chr(ord('A') + letter_idx)}: {lbl}"

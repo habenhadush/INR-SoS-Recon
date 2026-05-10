@@ -167,14 +167,13 @@ def run_inr_config(sweep_cfg, dataset, indices, base_config, run_tag, log,
     mtype   = sweep_cfg["model_type"]
     hparams = sweep_cfg["hyperparams"]
 
-    # Map legacy 'INR' label to 'Plain INR' for report clarity
-    if method == "INR":
-        method = "Plain INR"
+    # Use 'PI' for legacy 'INR' label in reports
+    display_method = "PI" if method == "INR" else method
 
-    label   = f"{method} / {mtype}"
+    label   = f"{display_method} / {mtype}"
     wb_name = f"{run_tag}_rank{rank}_{method}_{mtype}"
 
-    log.info(f"\n  ── rank#{rank}: {method} / {mtype} ──")
+    log.info(f"\n  ── rank#{rank}: {display_method} / {mtype} ──")
 
     cfg = copy.deepcopy(base_config)
     if hasattr(dataset, 'pix2time') and dataset.pix2time is not None:
@@ -541,6 +540,8 @@ def main():
     parser.add_argument("--warm_init", action="store_true")
     parser.add_argument("--top_k_per_model", default=None, type=int)
     parser.add_argument("--job_name", default=None)
+    parser.add_argument("--tag", default=None,
+                        help="Optional tag to append to the result directory name.")
     parser.add_argument("--report_plots", action="store_true",
                         help="Generate thesis-quality comparison figures (SVG + PNG).")
     parser.add_argument("--no_exclude_sweep_samples", action="store_true",
@@ -616,9 +617,10 @@ def main():
 
     registry, entry = load_registry(args.sweep_id)
 
-    # ── Plot dir: data/inr/<sweep_id>/<dataset>/<timestamp>/ ────────────────
+    # ── Plot dir: data/inr/<sweep_id>/<dataset>/<timestamp>[_<tag>]/ ─────────
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    plot_dir = SCRIPTS_DIR / "data" / "inr" / args.sweep_id / ds_cfg["key"] / timestamp
+    dir_name = f"{timestamp}_{args.tag}" if args.tag else timestamp
+    plot_dir = SCRIPTS_DIR / "data" / "inr" / args.sweep_id / ds_cfg["key"] / dir_name
     plot_dir.mkdir(parents=True, exist_ok=True)
 
     # ── Sample indices ────────────────────────────────────────────────────
