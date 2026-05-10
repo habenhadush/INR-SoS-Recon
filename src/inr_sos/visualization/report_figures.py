@@ -96,7 +96,7 @@ _WONG = [
 # Baseline methods drawn grey; INR methods drawn blue/teal.
 # "Plain INR" is the bare ReluMLP fit (no denoiser / no staged curriculum);
 # "Raw INR" kept for back-compat with results.json files written pre-rename.
-_BASELINE_LABELS = {"L1", "L2", "Plain INR", "Raw INR"}
+_BASELINE_LABELS = {"L1", "L2", "PI", "Plain INR", "Raw INR"}
 
 # Roman numerals for column headers (up to 20 samples)
 _ROMAN = [
@@ -143,7 +143,7 @@ def _diverging_norm(v_gt_2d: np.ndarray,
     return mcolors.TwoSlopeNorm(vmin=vmin, vcenter=bg, vmax=vmax)
 
 
-def _annotate_cell(ax: plt.Axes, text: str, fontsize: int = 7) -> None:
+def _annotate_cell(ax: plt.Axes, text: str, fontsize: int = 5) -> None:
     """Overlay metric text in the bottom-left corner of an image cell."""
     ax.text(
         0.03, 0.03, text,
@@ -330,7 +330,7 @@ def plot_method_grid(
 
         # Dataset title above the column headers
         if dataset_title:
-            fig.suptitle(dataset_title, fontsize=10, fontweight="bold", y=0.97)
+            fig.suptitle(dataset_title, fontsize=10, fontweight="bold", y=0.98)
 
         # Row label: "GT"
         gt_row_axes[0].set_ylabel("GT", fontsize=9, rotation=0,
@@ -360,7 +360,7 @@ def plot_method_grid(
                 _annotate_cell(
                     ax,
                     f"MAE: {mae_val:.1f}\nCNR: {cnr_val:.2f}",
-                    fontsize=6,
+                    fontsize=5,
                 )
                 method_row_axes.append(ax)
 
@@ -379,12 +379,20 @@ def plot_method_grid(
         for label in results.keys():
             if label in _BASELINE_LABELS:
                 c = "#888888"
+                # Simplify legend: if label is PI or Plain INR, use PI.
+                # If L1/L2, just use L1/L2.
+                if label in {"PI", "Plain INR"}:
+                    legend_label = "PI"
+                else:
+                    legend_label = label
             else:
                 c = _WONG[1 + inr_idx % (len(_WONG) - 1)]
                 inr_idx += 1
+                legend_label = f"{_SHORT[label]}: {label}"
+
             legend_handles.append(
                 Patch(facecolor=c, alpha=0.65, edgecolor="grey",
-                      linewidth=0.4, label=f"{_SHORT[label]}: {label}")
+                      linewidth=0.4, label=legend_label)
             )
         # Place the legend in the reserved bottom strip.
         # bbox_to_anchor uses figure-fraction coordinates.
@@ -583,12 +591,17 @@ def plot_metrics_comparison(
         letter_idx = 0
         for lbl in method_names:
             if lbl in _BASELINE_LABELS:
-                tag = lbl
+                c = method_colors[lbl]
+                if lbl in {"PI", "Plain INR"}:
+                    tag = "PI"
+                else:
+                    tag = lbl
             else:
+                c = method_colors[lbl]
                 tag = f"{chr(ord('A') + letter_idx)}: {lbl}"
                 letter_idx += 1
             legend_handles.append(
-                Patch(facecolor=method_colors[lbl], alpha=0.65,
+                Patch(facecolor=c, alpha=0.65,
                       edgecolor="grey", linewidth=0.4, label=tag)
             )
         fig.legend(

@@ -470,8 +470,8 @@ def main():
         rmses = [r[cond]["metrics"]["RMSE"] for r in all_results]
         ssims = [r[cond]["metrics"]["SSIM"] for r in all_results]
         cnrs = [r[cond]["metrics"]["CNR"] for r in all_results]
-        label = {"l1": "L1 Baseline", "l2": "L2 Baseline",
-                 "raw": "Raw INR", "denoised": "Denoised INR"}[cond]
+        label = {"l1": "L1", "l2": "L2",
+                 "raw": "PI", "denoised": "Denoised INR"}[cond]
         log.info(
             f"  {label:<15}"
             f"  {np.mean(maes):>6.2f}±{np.std(maes):<5.2f}"
@@ -495,7 +495,7 @@ def main():
         samples = [dataset[idx] for idx in indices]
         report_results = {}
         for cond, label in [("l1", "L1"), ("l2", "L2"),
-                            ("raw", "Raw INR"), ("denoised", "Denoised INR")]:
+                            ("raw", "PI"), ("denoised", "Denoised INR")]:
             if cond not in all_results[0]:
                 continue
             report_results[label] = [

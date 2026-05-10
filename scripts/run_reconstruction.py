@@ -166,6 +166,11 @@ def run_inr_config(sweep_cfg, dataset, indices, base_config, run_tag, log,
     method  = sweep_cfg["method"]
     mtype   = sweep_cfg["model_type"]
     hparams = sweep_cfg["hyperparams"]
+
+    # Map legacy 'INR' label to 'Plain INR' for report clarity
+    if method == "INR":
+        method = "Plain INR"
+
     label   = f"{method} / {mtype}"
     wb_name = f"{run_tag}_rank{rank}_{method}_{mtype}"
 

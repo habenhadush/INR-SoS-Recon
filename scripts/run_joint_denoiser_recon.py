@@ -841,7 +841,7 @@ def main():
 
     # ── Thesis-quality report figures (optional, staged results only) ────
     if args.report_plots:
-        _baselines = {"L1", "L2", "Plain INR", "Raw INR"}  # "Raw INR" kept for back-compat
+        _baselines = {"L1", "L2", "PI", "Plain INR", "Raw INR"}  # "Raw INR" kept for back-compat
         _topk_prefixes = ("rank", "roi", "cnr")
         report_results = {
             method: per_sample
