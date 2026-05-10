@@ -385,10 +385,17 @@ def optimize_direct_supervision(sample, L_matrix, model, label, config: ec, use_
     }
 
 
-def optimize_full_forward_operator(sample, L_matrix, model, label, config: ec, use_wandb=False):
+def optimize_full_forward_operator(sample, L_matrix, model, label, config: ec,
+                                   use_wandb=False,
+                                   selection_metric="loss",
+                                   gt_for_selection=None):
     """Phase 1: Full-matrix reconstruction.
 
-    Supports: Huber/MSE loss, slowness clamping, early stopping.
+    Supports: Huber/MSE loss, slowness clamping, early stopping, and (Plan E)
+    oracle MAE_roi checkpoint selection. When selection_metric='mae_roi' and
+    gt_for_selection is provided, training keeps the checkpoint with the
+    lowest per-step MAE_roi against ground-truth instead of the lowest
+    total loss. Gradients never see GT — same construction as Plan B's B5.
     """
     logging.info(f"\n--- {inspect.currentframe().f_code.co_name}: Training {label} (full-matrix) on {_DEVICE} ---")
 
@@ -406,6 +413,29 @@ def optimize_full_forward_operator(sample, L_matrix, model, label, config: ec, u
     # Early stopping setup
     stopper = _EarlyStopper(mask, config, model)
     train_mask = stopper.get_train_mask(mask)
+
+    # Plan E B5 — oracle MAE_roi checkpoint selection
+    _use_mae_roi = (selection_metric == "mae_roi" and gt_for_selection is not None)
+    _roi_mask_sel = None
+    _gt_sos_sel = None
+    _best_mae_roi = float("inf")
+    _best_state_mae_roi = None
+    if _use_mae_roi:
+        from inr_sos.evaluation.metrics import compute_roi_masks
+        _gt_np = gt_for_selection
+        if isinstance(_gt_np, torch.Tensor):
+            _gt_np = _gt_np.detach().cpu().numpy()
+        _gt_flat = np.asarray(_gt_np).flatten()
+        if np.mean(_gt_flat) < 1.0:
+            _gt_sos_sel = (1.0 / np.clip(_gt_flat, _SLOWNESS_MIN, _SLOWNESS_MAX)).reshape(64, 64)
+        else:
+            _gt_sos_sel = _gt_flat.reshape(64, 64)
+        _roi_mask_sel, _ = compute_roi_masks(_gt_sos_sel)
+        if _roi_mask_sel is not None:
+            logging.info(f"  B5 oracle: best-MAE_roi checkpoint ({int(_roi_mask_sel.sum())} ROI pixels)")
+        else:
+            logging.info("  B5 oracle requested but Otsu failed — falling back to loss")
+            _use_mae_roi = False
 
     loss_history = []
     pbar = tqdm(range(config.steps))
@@ -441,6 +471,16 @@ def optimize_full_forward_operator(sample, L_matrix, model, label, config: ec, u
         if step % 50 == 0:
             pbar.set_description(f"Loss (us^2): {loss.item():.4f}")
 
+        # Plan E B5 — oracle MAE_roi tracker
+        if _use_mae_roi and step % 50 == 0:
+            with torch.no_grad():
+                _pred_sos = (1.0 / s_phys.detach().cpu().numpy().flatten()).reshape(64, 64)
+                _mr = float(np.abs(_pred_sos[_roi_mask_sel]
+                                   - _gt_sos_sel[_roi_mask_sel]).mean())
+                if _mr < _best_mae_roi:
+                    _best_mae_roi = _mr
+                    _best_state_mae_roi = copy.deepcopy(model.state_dict())
+
         # Early stopping evaluation
         if stopper.enabled and step % config.log_interval == 0:
             with torch.no_grad():
@@ -458,8 +498,12 @@ def optimize_full_forward_operator(sample, L_matrix, model, label, config: ec, u
                 "Learning Rate": scheduler.get_last_lr()[0]
             }, step=step)
 
-    # Restore best model if early stopping was used
-    stopper.restore_best(model)
+    # Restore best checkpoint — oracle MAE_roi takes precedence over early-stopping loss
+    if _use_mae_roi and _best_state_mae_roi is not None:
+        model.load_state_dict(_best_state_mae_roi)
+        logging.info(f"  B5 oracle: restored best-MAE_roi checkpoint (MAE_roi={_best_mae_roi:.2f})")
+    else:
+        stopper.restore_best(model)
 
     model.eval()
     with torch.no_grad():

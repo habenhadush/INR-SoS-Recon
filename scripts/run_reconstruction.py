@@ -541,8 +541,35 @@ def main():
     parser.add_argument("--no_exclude_sweep_samples", action="store_true",
                         help="Do NOT exclude sweep indices from the evaluation pool "
                              "(default: sweep + validation indices are excluded).")
+    # Plan E — replay-side ranking (mirrors run_joint_denoiser_recon.py)
+    parser.add_argument(
+        "--selection_metric", default="loss",
+        choices=["loss", "mae_roi", "cnr", "mixed"],
+        help="Replay-side top-K ranking. 'loss' sorts by MAE_mean (legacy); "
+             "'mae_roi' by MAE_roi_mean asc; 'cnr' by CNR_mean desc; "
+             "'mixed' combines n by MAE_roi + m by CNR (dedupe + fill-up). "
+             "Independent of the per-run B5 oracle inside the sweep agent.",
+    )
+    parser.add_argument(
+        "--mixed_split", default=None,
+        help="For --selection_metric mixed: 'n,m' where n+m==top_k. "
+             "n configs ranked by MAE_roi, m by CNR.",
+    )
 
     args = parser.parse_args()
+
+    # Resolve --mixed_split early (parser-friendly errors)
+    mixed_split = None
+    if args.selection_metric == "mixed":
+        if not args.mixed_split:
+            parser.error("--selection_metric mixed requires --mixed_split n,m")
+        try:
+            n_str, m_str = args.mixed_split.split(",")
+            mixed_split = (int(n_str), int(m_str))
+        except ValueError:
+            parser.error(f"--mixed_split must be 'n,m' (got '{args.mixed_split}')")
+        if args.top_k is None or sum(mixed_split) != args.top_k:
+            parser.error(f"--mixed_split {mixed_split} must sum to --top_k ({args.top_k})")
 
     # ── Load dataset ──────────────────────────────────────────────────────
     ds_cfg    = load_dataset_config(args.dataset)
@@ -553,6 +580,11 @@ def main():
         if matrix_file:
             ds_kwargs["matrix_path"] = DATA_DIR + matrix_file
             ds_kwargs["use_external_L_matrix"] = True
+    baselines_file = ds_cfg.get("baselines_file")
+    if baselines_file:
+        ds_kwargs["baselines_path"] = DATA_DIR + baselines_file
+        if ds_cfg.get("baselines_keys"):
+            ds_kwargs["baselines_keys"] = ds_cfg["baselines_keys"]
     if ds_cfg.get("h5_keys"):
         ds_kwargs["h5_keys"] = ds_cfg["h5_keys"]
     dataset = USDataset(ds_cfg["data_path"], grid_path, **ds_kwargs)
@@ -624,18 +656,86 @@ def main():
     sweep = api.sweep(
         f"{entry['entity']}/{entry['project']}/{entry['sweep_id']}"
     )
-    # Prefer MAE_mean (GT datasets), fallback to loss_mean (no-GT sweeps)
-    runs_with_mae = [r for r in sweep.runs if "MAE_mean" in r.summary]
-    if runs_with_mae:
-        completed = sorted(runs_with_mae,
-                           key=lambda r: r.summary["MAE_mean"])
-    else:
-        runs_with_loss = [r for r in sweep.runs if "loss_mean" in r.summary]
-        completed = sorted(runs_with_loss,
-                           key=lambda r: r.summary["loss_mean"])
-        log.info("  No MAE in sweep runs — sorting by loss_mean")
+    all_runs = list(sweep.runs)
 
-    sort_key = "MAE_mean" if runs_with_mae else "loss_mean"
+    def _by_field(rs, field, ascending=True, fallback="MAE_mean"):
+        have = [r for r in rs if field in r.summary]
+        if not have:
+            log.warning(f"  '{field}' not in sweep summary — falling back to '{fallback}'")
+            have = [r for r in rs if fallback in r.summary]
+            return sorted(have, key=lambda r: r.summary[fallback])
+        return sorted(have,
+                      key=(lambda r: r.summary[field]) if ascending
+                      else (lambda r: -r.summary[field]))
+
+    # Plan E — replay-side ranking dispatch
+    sel = args.selection_metric
+    pairs: list = []   # list of (run, source_tag) for downstream rank labels
+    if sel == "mae_roi":
+        pairs = [(r, "roi") for r in _by_field(all_runs, "MAE_roi_mean")[:args.top_k]]
+        sort_key = "MAE_roi_mean"
+    elif sel == "cnr":
+        pairs = [(r, "cnr") for r in _by_field(all_runs, "CNR_mean", ascending=False)[:args.top_k]]
+        sort_key = "CNR_mean"
+    elif sel == "mixed":
+        n, m = mixed_split
+        roi_ranked = _by_field(all_runs, "MAE_roi_mean")
+        cnr_ranked = _by_field(all_runs, "CNR_mean", ascending=False)
+        picked_ids: set = set()
+        pairs_roi: list = []
+        pairs_cnr: list = []
+        for r in roi_ranked:
+            if len(pairs_roi) >= n:
+                break
+            if r.id not in picked_ids:
+                pairs_roi.append((r, "roi"))
+                picked_ids.add(r.id)
+        for r in cnr_ranked:
+            if len(pairs_cnr) >= m:
+                break
+            if r.id not in picked_ids:
+                pairs_cnr.append((r, "cnr"))
+                picked_ids.add(r.id)
+        # Fill-up if dedupe shrank either list
+        for r in roi_ranked:
+            if len(pairs_roi) >= n:
+                break
+            if r.id not in picked_ids:
+                pairs_roi.append((r, "roi"))
+                picked_ids.add(r.id)
+        for r in cnr_ranked:
+            if len(pairs_cnr) >= m:
+                break
+            if r.id not in picked_ids:
+                pairs_cnr.append((r, "cnr"))
+                picked_ids.add(r.id)
+        pairs = pairs_roi + pairs_cnr
+        sort_key = "MAE_composite_mean"   # display only
+        log.info(f"  mixed({n},{m}): {len(pairs_roi)} from MAE_roi + "
+                 f"{len(pairs_cnr)} from CNR (total {len(pairs)})")
+    else:
+        # Legacy "loss" — preserve existing fallback to loss_mean for no-GT sweeps.
+        # KEEP the full sorted list (no truncation) so --top_k_per_model can group
+        # over all runs; truncation to top-k happens in the selection block below.
+        runs_with_mae = [r for r in all_runs if "MAE_mean" in r.summary]
+        if runs_with_mae:
+            completed_full = sorted(runs_with_mae, key=lambda r: r.summary["MAE_mean"])
+            sort_key = "MAE_mean"
+        else:
+            completed_full = sorted([r for r in all_runs if "loss_mean" in r.summary],
+                                    key=lambda r: r.summary["loss_mean"])
+            sort_key = "loss_mean"
+            log.info("  No MAE in sweep runs — sorting by loss_mean")
+        completed = completed_full
+        pair_sources = ["rank"] * len(completed)
+        # pairs only used for new modes; for loss mode, downstream --top_k logic applies
+        pairs = [(r, "rank") for r in completed]
+
+    if sel != "loss":
+        completed = [r for (r, _) in pairs]   # already truncated to top_k
+        pair_sources = [s for (_, s) in pairs]
+
+    log.info(f"  Replay ranking: --selection_metric={sel}  sort_key={sort_key}")
 
     if args.top_k_per_model:
         k = args.top_k_per_model

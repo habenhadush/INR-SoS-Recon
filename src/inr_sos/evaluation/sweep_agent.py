@@ -33,7 +33,7 @@ import numpy as np
 from pathlib import Path
 
 from inr_sos.utils.config import ExperimentConfig
-from inr_sos.evaluation.metrics import calculate_metrics
+from inr_sos.evaluation.metrics import calculate_metrics, compute_sweep_objective
 
 _log = logging.getLogger(__name__)
 
@@ -150,6 +150,9 @@ def run_sweep_agent(
     n_runs: int = 60,
     entity: str = None,
     project: str = None,
+    roi_weight: float = 0.0,
+    contrast_weight: float = 0.0,
+    selection_metric: str = "loss",
 ):
     """
     Launch the unified sweep agent.
@@ -163,6 +166,14 @@ def run_sweep_agent(
     n_runs         : total Bayesian trials
     entity         : W&B entity (username or team). If None, uses wandb default.
     project        : W&B project name. If None, uses base_config.project_name.
+
+    Plan E parameters (inclusion-aware sweep ranking, mirrors Plan B):
+    roi_weight       : MAE_composite blend. 0 = pure MAE_mean (legacy);
+                       0.7 = 70% MAE_roi + 30% MAE_mean; 1.0 = pure MAE_roi.
+    contrast_weight  : multiplicative penalty on low contrast recovery.
+                       0 = backward compatible; 1 doubles objective at CR=0.
+    selection_metric : "loss" (default) or "mae_roi" — checkpoint criterion
+                       inside each engine call (B5 oracle).
     """
     project = project or base_config.project_name
     from inr_sos.models.mlp import FourierMLP, ReluMLP, GeluMLP
@@ -230,12 +241,22 @@ def run_sweep_agent(
 
         # ── Train on every target sample ──────────────────────────────────
         all_mae, all_ssim, all_rmse, all_cnr = [], [], [], []
+        all_mae_roi, all_mae_bkg, all_contrast, all_composite = [], [], [], []
+
+        # Plan E B5: only Full_Matrix engine supports selection_metric.
+        _engine_kwargs = {}
+        if method == "Full_Matrix" and selection_metric != "loss":
+            _engine_kwargs["selection_metric"] = selection_metric
 
         for sample_num, idx in enumerate(target_indices):
             sample = dataset[idx]
             cfg.sample_idx = idx
 
             model = _build_model(model_cls, model_type, cfg)
+
+            engine_call_kwargs = dict(_engine_kwargs)
+            if engine_call_kwargs.get("selection_metric") == "mae_roi":
+                engine_call_kwargs["gt_for_selection"] = sample["s_gt_raw"]
 
             # use_wandb=False: prevents step regression warnings.
             result_dict = engine_fn(
@@ -245,6 +266,7 @@ def run_sweep_agent(
                 label=model_type,
                 config=cfg,
                 use_wandb=False,
+                **engine_call_kwargs,
             )
 
             metrics = calculate_metrics(
@@ -256,14 +278,25 @@ def run_sweep_agent(
             all_ssim.append(metrics["SSIM"])
             all_rmse.append(metrics["RMSE"])
             all_cnr.append(metrics["CNR"])
+            all_mae_roi.append(metrics["MAE_roi"])
+            all_mae_bkg.append(metrics["MAE_bkg"])
+            all_contrast.append(metrics["contrast_recovery"])
+
+            # Plan E B1/B3/B4: per-sample composite objective
+            objective = compute_sweep_objective(metrics, roi_weight, contrast_weight)
+            all_composite.append(objective)
 
             # Per-sample metrics — step is sample_num (monotonic, safe)
             wandb.log({
-                "sample/MAE":  metrics["MAE"],
-                "sample/SSIM": metrics["SSIM"],
-                "sample/RMSE": metrics["RMSE"],
-                "sample/CNR":  metrics["CNR"],
-                "sample/idx":  idx,
+                "sample/MAE":     metrics["MAE"],
+                "sample/SSIM":    metrics["SSIM"],
+                "sample/RMSE":    metrics["RMSE"],
+                "sample/CNR":     metrics["CNR"],
+                "sample/MAE_roi": metrics["MAE_roi"],
+                "sample/MAE_bkg": metrics["MAE_bkg"],
+                "sample/contrast_recovery": metrics["contrast_recovery"],
+                "sample/sweep_objective":   objective,
+                "sample/idx":     idx,
             }, step=sample_num)
 
         # ── Aggregate — what the Bayesian optimiser reads ─────────────────
@@ -276,6 +309,16 @@ def run_sweep_agent(
             "SSIM_std":  float(np.std(all_ssim)),
             "CNR_mean":  float(np.mean(all_cnr)),
             "CNR_std":   float(np.std(all_cnr)),
+            # Plan E aggregates — used when ranking by MAE_composite_mean
+            "MAE_roi_mean":          float(np.mean(all_mae_roi)),
+            "MAE_roi_std":           float(np.std(all_mae_roi)),
+            "MAE_bkg_mean":          float(np.mean(all_mae_bkg)),
+            "contrast_recovery_mean": float(np.mean(all_contrast)),
+            "MAE_composite_mean":    float(np.mean(all_composite)),
+            "MAE_composite_std":     float(np.std(all_composite)),
+            "roi_weight":            float(roi_weight),
+            "contrast_weight":       float(contrast_weight),
+            "selection_metric":      selection_metric,
         })
         wandb.finish()
 

@@ -19,7 +19,7 @@ class USDataset(Dataset):
 
     def __init__(self, data_path, grid_path, matrix_path=None,
                  use_external_L_matrix=False, paths_per_batch=None,
-                 h5_keys=None):
+                 h5_keys=None, baselines_path=None, baselines_keys=None):
         """
         PyTorch Dataset for Speed-of-Sound Inversion.
 
@@ -37,6 +37,12 @@ class USDataset(Dataset):
               "measurements" : measurement displacement field  (default: "measmnts")
               "ground_truth" : ground truth slowness images    (default: "imgs_gt")
               "nan_mask"     : NaN/invalid ray mask            (default: "nanidx")
+        baselines_path : str (Optional)
+            Path to external .mat file containing L1/L2 baseline reconstructions.
+            Used as fallback when the data file does not embed baselines.
+        baselines_keys : dict (Optional)
+            Override key names for baseline arrays inside the external file.
+            Defaults: {"l1": "all_slowness_recons_l1", "l2": "all_slowness_recons_l2"}.
         """
         self.data_path = Path(data_path)
         self.h5_file = None  # Will be used for lazy loading
@@ -188,12 +194,54 @@ class USDataset(Dataset):
             else:
                 self.correlation_vectors = None
 
+        # 4b. Fallback to external baselines file if embedded baselines absent.
+        if baselines_path is not None and (self.benchmarks_l1 is None or self.benchmarks_l2 is None):
+            keys = {"l1": "all_slowness_recons_l1", "l2": "all_slowness_recons_l2"}
+            keys.update(baselines_keys or {})
+            logging.info(f"Loading external baselines from: {baselines_path}")
+            ext = load_mat(baselines_path)
+            for which in ("l1", "l2"):
+                if getattr(self, f"benchmarks_{which}") is not None:
+                    continue
+                key = keys[which]
+                if key not in ext:
+                    logging.warning(f"External baselines file missing key '{key}' (skipping {which.upper()}).")
+                    continue
+                arr = np.asarray(ext[key])
+                normalized = self._normalize_baseline_array(arr, key)
+                setattr(self, f"benchmarks_{which}", normalized)
+                logging.info(f"External {which.upper()} benchmarks loaded with shape: {normalized.shape}")
+
         # 5. LOAD METADATA (bf_sos, pix2time, reg_param, MaskSoS)
         meta = load_metadata(str(self.data_path))
         self.bf_sos = meta.get('bf_sos', None)
         self.pix2time = meta.get('pix2time', None)
         self.reg_param = meta.get('reg_param', None)
         self.mask_sos = meta.get('MaskSoS', None)
+
+    def _normalize_baseline_array(self, arr, key):
+        """Reshape an external baseline array to put sample axis first.
+
+        Returns array with shape (N, 64, 64) for 3D inputs or (N, 4096) for 2D,
+        where N matches the dataset length. Falls back to as-is when the layout
+        is ambiguous (and logs a warning so the caller can spot it).
+        """
+        n = self.length
+        if arr.ndim == 3:
+            if arr.shape[0] == n:
+                return arr
+            if arr.shape[2] == n:
+                return arr.transpose(2, 0, 1)
+        elif arr.ndim == 2:
+            if arr.shape[0] == n:
+                return arr
+            if arr.shape[1] == n:
+                return arr.T
+        logging.warning(
+            f"Could not orient external baseline '{key}' with shape {arr.shape} "
+            f"to dataset length {n}; using as-is."
+        )
+        return arr
 
     def _open_h5_file(self):
         """Helper to open HDF5 file for lazy loading."""

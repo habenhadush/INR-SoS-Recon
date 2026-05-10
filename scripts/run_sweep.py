@@ -118,6 +118,18 @@ def main():
     parser.add_argument("--project",   default="INR-SoS-Recon")
     parser.add_argument("--registry_file", default=None,
                         help="Local registry JSON (avoids race conditions in parallel mode)")
+    # Plan E — inclusion-aware sweep ranking (mirrors Plan B on joint sweep)
+    parser.add_argument("--roi_weight", type=float, default=0.0,
+                        help="MAE_composite blend (Plan E B1-B3). 0=pure MAE_mean, "
+                             "0.7=70%% MAE_roi + 30%% MAE_mean, 1.0=pure MAE_roi.")
+    parser.add_argument("--contrast_weight", type=float, default=0.0,
+                        help="Contrast penalty weight (Plan E B4). 0=disabled, "
+                             "1=doubles objective at CR=0. Only meaningful when roi_weight>0.")
+    parser.add_argument("--selection_metric", default="loss",
+                        choices=["loss", "mae_roi"],
+                        help="Plan E B5: 'mae_roi' uses oracle MAE_roi checkpoint "
+                             "selection inside Full_Matrix engine. 'loss' (default) "
+                             "uses early-stopping/best-loss checkpoint.")
     args = parser.parse_args()
 
     # Resolve registry file
@@ -226,6 +238,9 @@ def main():
             n_runs=args.n_runs,
             entity=entity,
             project=project,
+            roi_weight=args.roi_weight,
+            contrast_weight=args.contrast_weight,
+            selection_metric=args.selection_metric,
         )
         elapsed = (time.time() - t_start) / 3600
         log.info(f"Sweep finished — {args.n_runs} runs in {elapsed:.1f} hours")
