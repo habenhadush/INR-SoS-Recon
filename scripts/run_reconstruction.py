@@ -289,6 +289,7 @@ def run_inr_config(sweep_cfg, dataset, indices, base_config, run_tag, log,
 
     # Aggregate
     agg = {
+        "rank":            rank,
         "method":          label,
         "recon_time_mean": float(np.mean(recon_times)),
         "recon_time_std":  float(np.std(recon_times)),
@@ -824,7 +825,9 @@ def main():
         # Build {label: [{"metrics": ..., "s_phys": ...}]} from per_sample lists
         report_results: dict = {}
         for result in all_results:
-            label = result["method"]
+            # Ensure unique label for report plots to avoid overwriting top-K configs
+            rank_val = result.get("rank")
+            label = f"rank#{rank_val} {result['method']}" if rank_val is not None else result["method"]
             report_results[label] = [
                 {
                     "metrics": {k: entry[k] for k in ("MAE", "RMSE", "SSIM", "CNR")

@@ -273,7 +273,14 @@ def plot_method_grid(
                               for b in _BASELINE_LABELS)
             if is_baseline:
                 if "PI" in label or "Plain INR" in label:
-                    _SHORT[label] = "PI"
+                    # If it has a rank, keep it unique in the short label
+                    if "rank#" in label:
+                        import re
+                        match = re.search(r'rank#(\d+)', label)
+                        rnum = match.group(1) if match else "?"
+                        _SHORT[label] = f"PI-{rnum}"
+                    else:
+                        _SHORT[label] = "PI"
                 elif "L1" in label:
                     _SHORT[label] = "L1"
                 elif "L2" in label:
@@ -573,7 +580,13 @@ def plot_metrics_comparison(
                                   for b in _BASELINE_LABELS)
                 if is_baseline:
                     if "PI" in label or "Plain INR" in label:
-                        short_labels.append("PI")
+                        if "rank#" in label:
+                            import re
+                            match = re.search(r'rank#(\d+)', label)
+                            rnum = match.group(1) if match else "?"
+                            short_labels.append(f"PI-{rnum}")
+                        else:
+                            short_labels.append("PI")
                     elif "L1" in label:
                         short_labels.append("L1")
                     elif "L2" in label:
