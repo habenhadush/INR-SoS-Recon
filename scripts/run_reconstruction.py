@@ -884,7 +884,11 @@ def main():
         "sweep_id": args.sweep_id,
         "n_samples": len(indices),
         "indices": indices,
-        "methods": {r["method"]: r for r in slim_results},
+        # Use rank-aware keys to prevent overwriting same-architecture configs
+        "methods": {
+            (f"rank#{r['rank']} {r['method']}" if "rank" in r else r["method"]): r
+            for r in slim_results
+        },
     }
     with open(plot_dir / "results.json", "w") as f:
         json.dump(results_json, f, indent=2)
