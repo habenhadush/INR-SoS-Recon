@@ -272,8 +272,9 @@ def calculate_metrics(s_phys_pred, s_gt_raw, grid_shape=(64, 64)):
         pred_flat = 1.0 / pred_flat   # now in [SOS_MIN, SOS_MAX]
         gt_flat   = 1.0 / gt_flat
 
-    pred_img = pred_flat.reshape(grid_shape)
-    gt_img   = gt_flat.reshape(grid_shape)
+    # Reshape using order="F" to match USDataset flattening
+    pred_img = pred_flat.reshape(grid_shape, order="F")
+    gt_img   = gt_flat.reshape(grid_shape, order="F")
 
     # MAE & RMSE
     abs_error = np.abs(pred_img - gt_img)
