@@ -15,22 +15,26 @@ from inr_sos.io.utils import load_mat
 DATA_FILE      = DATA_DIR + "/DL-based-SoS/train-VS-8pairs-IC-081225.mat"
 BASELINES_FILE = DATA_DIR + "/DL-based-SoS/train_IC_10k_l2rec_l1rec_imcon.mat"
 
-IDX = 1   # same sample you've been inspecting
+IDX = 860   # sample with a visible inclusion (curved blob, lower-left in display)
 GRID = (64, 64)
 
 
-def corners(arr2d, name):
-    """Print the four corners of a 2D image to fingerprint its orientation."""
-    return (f"{name}: shape={arr2d.shape}, "
-            f"[0,0]={arr2d[0,0]:.6f}  [0,-1]={arr2d[0,-1]:.6f}  "
-            f"[-1,0]={arr2d[-1,0]:.6f}  [-1,-1]={arr2d[-1,-1]:.6f}")
+def fingerprint(arr2d, name):
+    """Print pixels along an asymmetric line so any transpose/flip becomes visible."""
+    a = arr2d
+    return (f"{name}: shape={a.shape}, dtype={a.dtype}\n"
+            f"    argmax_idx={np.unravel_index(np.argmax(a), a.shape)}  "
+            f"argmin_idx={np.unravel_index(np.argmin(a), a.shape)}\n"
+            f"    diag5      = {[float(a[i, i]) for i in (0, 16, 32, 48, 63)]}\n"
+            f"    row30_cols = {[float(a[30, c]) for c in (0, 16, 32, 48, 63)]}\n"
+            f"    col30_rows = {[float(a[r, 30]) for r in (0, 16, 32, 48, 63)]}")
 
 
 def roundtrip(arr2d, label):
     """Apply the C-flatten -> F-reshape round-trip the plotting code uses."""
-    flat = arr2d.flatten()                            # order='C' (numpy default)
+    flat = arr2d.flatten()
     back = flat.reshape(GRID, order="F")
-    return corners(back, f"{label}.flatten().reshape(F)")
+    return fingerprint(back, f"{label}.flatten().reshape(F)")
 
 
 print("=" * 72)
@@ -95,8 +99,25 @@ print(" ", roundtrip(img, "l1_img_loadmat"))
 
 print()
 print("=" * 72)
-print("4. Comparison — do GT and L1 (loadmat path) have the same orientation?")
+print("4. Direct equality — does the load_mat+normalize path produce the same")
+print("   per-sample array as raw h5py read? If YES, my fix is correct.")
 print("=" * 72)
-print("If GT [-1,-1] is in the BOTTOM-RIGHT of the GT display,")
-print("then L1 corners should look 'similar geometrically' for the same sample.")
-print("If they DON'T match orientation, the L1 image is being displayed transposed/rotated.")
+
+# Recompute both for the same IDX
+with h5py.File(BASELINES_FILE, "r") as f:
+    h5_img = np.array(f["all_slowness_recons_l1"])[IDX]
+loadmat_img = norm[IDX]
+
+print(f"  h5py shape:    {h5_img.shape}")
+print(f"  loadmat shape: {loadmat_img.shape}")
+print(f"  np.allclose(h5py, loadmat)        = {np.allclose(h5_img, loadmat_img)}")
+print(f"  np.allclose(h5py, loadmat.T)      = {np.allclose(h5_img, loadmat_img.T)}")
+print(f"  np.allclose(h5py, np.flipud(lm))  = {np.allclose(h5_img, np.flipud(loadmat_img))}")
+print(f"  np.allclose(h5py, np.fliplr(lm))  = {np.allclose(h5_img, np.fliplr(loadmat_img))}")
+print(f"  np.allclose(h5py, rot90(lm,k=1))  = {np.allclose(h5_img, np.rot90(loadmat_img, 1))}")
+print(f"  np.allclose(h5py, rot90(lm,k=2))  = {np.allclose(h5_img, np.rot90(loadmat_img, 2))}")
+print(f"  np.allclose(h5py, rot90(lm,k=3))  = {np.allclose(h5_img, np.rot90(loadmat_img, 3))}")
+print()
+print("  Which of the above is True tells us exactly how load_mat's path relates")
+print("  to the h5py-direct path — and therefore exactly what transform to apply")
+print("  to make the external baseline orientation match the embedded one.")
