@@ -46,7 +46,7 @@ with h5py.File(DATA_FILE, "r") as f:
     print(f"  imgs_gt raw shape: {arr.shape}")
     gt_img = arr[IDX]
     print(f"  imgs_gt[{IDX}] shape: {gt_img.shape}")
-    print(" ", corners(gt_img, "gt_img"))
+    print(" ", fingerprint(gt_img, "gt_img"))
     print(" ", roundtrip(gt_img, "gt_img"))
 
 print()
@@ -60,7 +60,7 @@ try:
         print(f"  raw shape: {arr.shape}")
         img = arr[IDX]
         print(f"  [{IDX}] shape: {img.shape}")
-        print(" ", corners(img, "l1_img_h5py"))
+        print(" ", fingerprint(img, "l1_img_h5py"))
         print(" ", roundtrip(img, "l1_img_h5py"))
 except Exception as e:
     print(f"  h5py.File failed (file may be v7-classic): {type(e).__name__}: {e}")
@@ -94,7 +94,7 @@ else:
 
 img = norm[IDX]
 print(f"  normalized[{IDX}] shape: {img.shape}")
-print(" ", corners(img, "l1_img_loadmat"))
+print(" ", fingerprint(img, "l1_img_loadmat"))
 print(" ", roundtrip(img, "l1_img_loadmat"))
 
 print()
