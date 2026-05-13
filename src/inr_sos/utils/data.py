@@ -63,12 +63,14 @@ class USDataset(Dataset):
         self.grid = USGrid(clean_grid_dict)
         
         # 2. PRE-CALCULATE NORMALIZED COORDINATES (Inputs)
-        # The INR needs (x, z) inputs in range [-1, 1]. 
+        # The INR needs (x, z) inputs in range [-1, 1].
         # Since these are fixed, we generate them once here.
-        # Shape: (4096, 2). Use order="F" to match L-matrix and visualization.
+        # Shape: (4096, 2). Use C-order flatten so coord ordering matches
+        # the L-matrix column ordering (verified empirically: ||L @ s − d|| is
+        # ~6× smaller with C-order than F-order on inverse-crime data).
         X_mesh, Z_mesh = np.meshgrid(self.grid.x_sos, self.grid.z_sos)
-        x_flat = X_mesh.flatten(order="F")
-        z_flat = Z_mesh.flatten(order="F")
+        x_flat = X_mesh.flatten()
+        z_flat = Z_mesh.flatten()
         
         x_norm, z_norm = self.grid.normalize(x_flat, z_flat)
         # Stack into (N, 2) tensor: [[x1, z1], [x2, z2], ...]
@@ -271,8 +273,7 @@ class USDataset(Dataset):
         # A. Load Ground Truth (4096, 1) — optional
         if self.has_ground_truth:
             s_raw = self.h5_file[self.h5_keys["ground_truth"]][idx]
-            # Flatten with order="F" to match L-matrix and visualization
-            s_vec = torch.tensor(s_raw.flatten(order="F"), dtype=torch.float32).unsqueeze(1)
+            s_vec = torch.tensor(s_raw.flatten(), dtype=torch.float32).unsqueeze(1)
             s_mean = s_vec.mean()
             s_std = s_vec.std()
             s_normalized = (s_vec - s_mean) / (s_std + 1e-8)
@@ -315,15 +316,15 @@ class USDataset(Dataset):
         # Optional benchmark / correlation fields (additive only)
         if self.benchmarks_l1 is not None:
             sample['s_l1_recon'] = torch.tensor(
-                self.benchmarks_l1[idx].flatten(order="F"), dtype=torch.float32
+                self.benchmarks_l1[idx].flatten(), dtype=torch.float32
             ).unsqueeze(1)
         if self.benchmarks_l2 is not None:
             sample['s_l2_recon'] = torch.tensor(
-                self.benchmarks_l2[idx].flatten(order="F"), dtype=torch.float32
+                self.benchmarks_l2[idx].flatten(), dtype=torch.float32
             ).unsqueeze(1)
         if self.correlation_vectors is not None:
             sample['correlation'] = torch.tensor(
-                self.correlation_vectors[idx].flatten(order="F"), dtype=torch.float32
+                self.correlation_vectors[idx].flatten(), dtype=torch.float32
             ).unsqueeze(1)
 
         return sample
