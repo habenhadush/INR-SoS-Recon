@@ -220,18 +220,22 @@ class USDataset(Dataset):
         self.mask_sos = meta.get('MaskSoS', None)
 
     def _normalize_baseline_array(self, arr, key):
-        """Reshape an external baseline array to put sample axis first.
+        """Reshape an external baseline array to match the embedded h5py convention.
 
-        Returns array with shape (N, 64, 64) for 3D inputs or (N, 4096) for 2D,
-        where N matches the dataset length. Falls back to as-is when the layout
-        is ambiguous (and logs a warning so the caller can spot it).
+        The downstream pipeline (C-order .flatten() then F-order reshape in the
+        plotting code) relies on a (sample, col, row) per-image axis ordering
+        produced by reading the data file directly via h5py. ``load_mat`` for
+        v7.3 .mat files instead returns the natural (row, col, sample) layout
+        after its own ``.T``. We must therefore not only put the sample axis
+        first but also swap the trailing per-image axes so the flatten/reshape
+        round-trip lands in the same orientation as the embedded baselines.
         """
         n = self.length
         if arr.ndim == 3:
-            if arr.shape[0] == n:
-                return arr
             if arr.shape[2] == n:
-                return arr.transpose(2, 0, 1)
+                return arr.transpose(2, 1, 0)
+            if arr.shape[0] == n:
+                return arr.transpose(0, 2, 1)
         elif arr.ndim == 2:
             if arr.shape[0] == n:
                 return arr

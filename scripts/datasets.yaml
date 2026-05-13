@@ -5,6 +5,7 @@ datasets:
     name: "IC 8-pairs (ray approx)"
     data_file: "/DL-based-SoS/train-VS-8pairs-IC-081225.mat"
     has_baselines: false
+    baselines_file: "/DL-based-SoS/train_IC_10k_l2rec_l1rec_imcon.mat"
     has_A_matrix: true
     notes: "10k samples, ray-approximation forward model"
     sweep:
