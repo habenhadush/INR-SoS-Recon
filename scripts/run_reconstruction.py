@@ -819,6 +819,49 @@ def main():
                           args.sweep_id, log, has_gt=has_gt,
                           wb_group=wb_group, plot_dir=plot_dir)
 
+    # ── Compute baselines (always when GT is available) ─────────────────
+    # These are persisted into results.json alongside the ranked INR configs,
+    # and reused below for the report figure when --report_plots is set.
+    baselines_data: dict = {}
+    samples_loaded = None
+    baseline_metrics: dict = {}   # label -> list of per-sample metric dicts (for plotting)
+    if has_gt:
+        samples_loaded = [dataset[idx] for idx in indices]
+        from inr_sos.evaluation.metrics import calculate_metrics as _calc
+        for sample_key, label in [("s_l1_recon", "L1"), ("s_l2_recon", "L2")]:
+            if sample_key not in samples_loaded[0]:
+                continue
+            per_sample_metrics = []
+            per_sample_entries = []
+            for sidx, s in zip(indices, samples_loaded):
+                m = _calc(s[sample_key], s["s_gt_raw"])
+                per_sample_metrics.append(m)
+                per_sample_entries.append({
+                    "idx":  int(sidx),
+                    "MAE":  float(m.get("MAE", 0.0)),
+                    "RMSE": float(m.get("RMSE", 0.0)),
+                    "SSIM": float(m.get("SSIM", 0.0)),
+                    "CNR":  float(m.get("CNR", 0.0)),
+                })
+            mae_arr  = [e["MAE"]  for e in per_sample_entries]
+            rmse_arr = [e["RMSE"] for e in per_sample_entries]
+            ssim_arr = [e["SSIM"] for e in per_sample_entries]
+            cnr_arr  = [e["CNR"]  for e in per_sample_entries]
+            baselines_data[label] = {
+                "method":     label,
+                "n_samples":  len(indices),
+                "MAE_mean":   float(np.mean(mae_arr)),  "MAE_std":  float(np.std(mae_arr)),
+                "RMSE_mean":  float(np.mean(rmse_arr)), "RMSE_std": float(np.std(rmse_arr)),
+                "SSIM_mean":  float(np.mean(ssim_arr)), "SSIM_std": float(np.std(ssim_arr)),
+                "CNR_mean":   float(np.mean(cnr_arr)),  "CNR_std":  float(np.std(cnr_arr)),
+                "per_sample": per_sample_entries,
+            }
+            baseline_metrics[label] = per_sample_metrics
+            log.info(f"  Baseline {label}: "
+                     f"MAE={baselines_data[label]['MAE_mean']:.3f}±{baselines_data[label]['MAE_std']:.3f}  "
+                     f"SSIM={baselines_data[label]['SSIM_mean']:.3f}±{baselines_data[label]['SSIM_std']:.3f}  "
+                     f"CNR={baselines_data[label]['CNR_mean']:.3f}±{baselines_data[label]['CNR_std']:.3f}")
+
     # ── Thesis-quality report figures (optional) ─────────────────────────
     if args.report_plots and has_gt:
         log.info("\n  Generating report figures ...")
@@ -837,15 +880,14 @@ def main():
                 for entry in result["per_sample"]
                 if entry.get("s_gt_np") is not None
             ]
-        # Add L1/L2 baselines if present in dataset
-        samples_loaded = [dataset[idx] for idx in indices]
-        for key, label in [("s_l1_recon", "L1"), ("s_l2_recon", "L2")]:
-            if key in samples_loaded[0]:
-                from inr_sos.evaluation.metrics import calculate_metrics as _calc
-                report_results[label] = [
-                    {"metrics": _calc(s[key], s["s_gt_raw"]), "s_phys": s[key]}
-                    for s in samples_loaded
-                ]
+        # Add L1/L2 baseline panels using metrics already computed above.
+        for sample_key, label in [("s_l1_recon", "L1"), ("s_l2_recon", "L2")]:
+            if label not in baseline_metrics:
+                continue
+            report_results[label] = [
+                {"metrics": m, "s_phys": s[sample_key]}
+                for s, m in zip(samples_loaded, baseline_metrics[label])
+            ]
         ds_titles = {
             "kwave_geom": "GeomSet",
             "kwave_blob": "BlobSet",
@@ -889,6 +931,7 @@ def main():
             (f"rank#{r['rank']} {r['method']}" if "rank" in r else r["method"]): r
             for r in slim_results
         },
+        "baselines": baselines_data,
     }
     with open(plot_dir / "results.json", "w") as f:
         json.dump(results_json, f, indent=2)
