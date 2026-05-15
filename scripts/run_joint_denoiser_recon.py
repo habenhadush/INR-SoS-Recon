@@ -901,11 +901,13 @@ def main():
     # ── Save results JSON ────────────────────────────────────────────────
     results_json = {
         "timestamp": timestamp,
+        "tag": args.tag,
         "dataset": args.dataset,
         "mode": args.mode,
         "n_samples": len(indices),
         "indices": indices,
         "methods": {},
+        "baselines": {},
     }
     if args.top_k and args.sweep_id:
         results_json["config_source"] = "sweep"
@@ -919,8 +921,24 @@ def main():
         results_json["lambda_strategy"] = args.lambda_strategy
         results_json["lambda_fit_values"] = args.lambda_fit
         results_json["denoise_cfg"] = denoise_cfg
+
+    _BASELINE_KEYS = {"L1", "L2"}
     for method, per_sample in all_results.items():
-        results_json["methods"][method] = [r["metrics"] for r in per_sample]
+        per_sample_metrics = [r["metrics"] for r in per_sample]
+        if method in _BASELINE_KEYS:
+            entries = [{"idx": int(idx), **m}
+                       for idx, m in zip(indices, per_sample_metrics)]
+            agg = {"method": method, "n_samples": len(per_sample_metrics),
+                   "per_sample": entries}
+            for key in ("MAE", "RMSE", "SSIM", "CNR"):
+                vals = [m[key] for m in per_sample_metrics
+                        if key in m and m[key] is not None]
+                if vals:
+                    agg[f"{key}_mean"] = float(np.mean(vals))
+                    agg[f"{key}_std"]  = float(np.std(vals))
+            results_json["baselines"][method] = agg
+        else:
+            results_json["methods"][method] = per_sample_metrics
 
     results_path = run_dir / "results.json"
     with open(results_path, "w") as f:
