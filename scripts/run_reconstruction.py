@@ -322,7 +322,7 @@ def run_inr_config(sweep_cfg, dataset, indices, base_config, run_tag, log,
     wandb.finish()
 
     # Terminal summary
-    if has_gt:
+    if has_gt and agg["MAE_mean"] is not None:
         log.info(f"  {label:<42} "
                  f"MAE={agg['MAE_mean']:.3f}±{agg['MAE_std']:.3f}  "
                  f"RMSE={agg['RMSE_mean']:.3f}±{agg['RMSE_std']:.3f}  "
@@ -466,13 +466,17 @@ def print_table(all_results, has_gt, log):
         log.info(f"  {'Method':<42} {'MAE±std':>13} {'RMSE±std':>13} "
                  f"{'SSIM±std':>13} {'Time(s)':>14}")
         log.info(f"  {'─'*88}")
+        def _fmt(m, s):
+            if m is None or s is None:
+                return f"{'n/a':>11}"
+            return f"{m:>5.3f}±{s:<5.3f}"
         for r in sorted(all_results, key=lambda x: x.get("MAE_mean") or 999):
             t = f"{r['recon_time_mean']:>6.0f}±{r['recon_time_std']:<5.0f}"
             log.info(
                 f"  {r['method']:<42}"
-                f"  {r['MAE_mean']:>5.3f}±{r['MAE_std']:<5.3f}"
-                f"  {r['RMSE_mean']:>5.3f}±{r['RMSE_std']:<5.3f}"
-                f"  {r['SSIM_mean']:>5.3f}±{r['SSIM_std']:<5.3f}"
+                f"  {_fmt(r['MAE_mean'],  r['MAE_std'])}"
+                f"  {_fmt(r['RMSE_mean'], r['RMSE_std'])}"
+                f"  {_fmt(r['SSIM_mean'], r['SSIM_std'])}"
                 f"  {t}"
             )
     else:
