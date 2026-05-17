@@ -4,7 +4,7 @@ run_joint_denoiser_recon.py
 ---------------------------
 Experiment 11: Joint denoiser + reconstructor (staged training).
 
-Compares: L1 | L2 | Plain INR | Joint (staged, with adaptive λ strategies)
+Compares: Joint (staged, with adaptive λ strategies) | L1 | L2
 
 Usage:
     # Fixed λ (default)
@@ -470,9 +470,7 @@ def plot_summary_bars(all_results, out_dir):
         cnr_stds.append(np.std(cnrs))
 
     x = np.arange(len(methods))
-    colors = ["#999999" if m in ("L1", "L2") else
-              "#2ca02c" if m == "Plain INR" else
-              "#1f77b4" for m in methods]
+    colors = ["#999999" if m in ("L1", "L2") else "#1f77b4" for m in methods]
 
     ax1.bar(x, mae_means, yerr=mae_stds, color=colors, capsize=4,
             edgecolor="black", linewidth=0.5)
@@ -658,33 +656,9 @@ def main():
     samples = [dataset[idx] for idx in indices]
 
     # ── All results: {method_name: [per_sample_results]} ─────────────────
+    # Joint methods are inserted first; L1/L2 baselines are appended at the
+    # end so they render last in plots and summary tables.
     all_results = {}
-
-    # L1/L2 baselines
-    for key, label in [("s_l1_recon", "L1"), ("s_l2_recon", "L2")]:
-        if key in samples[0]:
-            all_results[label] = []
-            for sample in samples:
-                m = calculate_metrics(sample[key], sample["s_gt_raw"])
-                all_results[label].append({"metrics": m, "s_phys": sample[key]})
-
-    # Plain INR baseline — single ReluMLP fit on raw k-wave measurements
-    # (no denoiser, no staged curriculum). Reference point for how a bare
-    # INR fit performs on mismatched data; labelled as a baseline in figures.
-    log.info("\n── Plain INR baseline ──")
-    all_results["Plain INR"] = []
-    for i, (idx, sample) in enumerate(zip(indices, samples)):
-        log.info(f"  Plain INR: sample {i+1}/{len(indices)} (idx={idx})")
-        model = build_recon_model(recon_cfg)
-        res = optimize_full_forward_operator(
-            sample=sample, L_matrix=dataset.L_matrix, model=model,
-            label="ReluMLP_plain", config=copy.deepcopy(recon_cfg), use_wandb=False,
-        )
-        m = calculate_metrics(res["s_phys"], sample["s_gt_raw"])
-        all_results["Plain INR"].append({
-            "metrics": m, "s_phys": res["s_phys"],
-            "loss_history": res["loss_history"],
-        })
 
     # ── Build joint configs ─────────────────────────────────────────────
     if args.top_k and args.sweep_id:
@@ -741,8 +715,7 @@ def main():
                 m = calculate_metrics(res["s_phys"], sample["s_gt_raw"])
                 m["time_s"] = elapsed
 
-                raw_m = all_results["Plain INR"][i]["metrics"]
-                log.info(f"    Plain MAE={raw_m['MAE']:.1f} → Joint MAE={m['MAE']:.1f}")
+                log.info(f"    Joint MAE={m['MAE']:.1f}")
 
                 all_results[method_label].append({
                     "metrics": m, "s_phys": res["s_phys"],
@@ -812,8 +785,7 @@ def main():
                 m = calculate_metrics(res["s_phys"], sample["s_gt_raw"])
                 m["time_s"] = elapsed
 
-                raw_m = all_results["Plain INR"][i]["metrics"]
-                log.info(f"    Plain MAE={raw_m['MAE']:.1f} → Joint MAE={m['MAE']:.1f}")
+                log.info(f"    Joint MAE={m['MAE']:.1f}")
 
                 all_results[method_label].append({
                     "metrics": m, "s_phys": res["s_phys"],
@@ -822,6 +794,14 @@ def main():
                     "fit_losses": res.get("fit_losses"),
                     "lambda_trajectory": res.get("lambda_trajectory"),
                 })
+
+    # ── L1/L2 baselines (appended last so they render at the end) ────────
+    for key, label in [("s_l1_recon", "L1"), ("s_l2_recon", "L2")]:
+        if key in samples[0]:
+            all_results[label] = []
+            for sample in samples:
+                m = calculate_metrics(sample[key], sample["s_gt_raw"])
+                all_results[label].append({"metrics": m, "s_phys": sample[key]})
 
     # ── Summary table ────────────────────────────────────────────────────
     log.info(f"\n{'='*90}")
@@ -847,7 +827,7 @@ def main():
 
     # ── Thesis-quality report figures (optional, staged results only) ────
     if args.report_plots:
-        _baselines = {"L1", "L2", "PI", "Plain INR", "Raw INR"}  # "Raw INR" kept for back-compat
+        _baselines = {"L1", "L2", "PI"}
         _topk_prefixes = ("rank", "roi", "cnr")
         report_results = {
             method: per_sample
