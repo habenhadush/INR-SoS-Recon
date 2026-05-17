@@ -536,7 +536,10 @@ def main():
              "(default: sweep + validation indices are excluded).",
     )
     parser.add_argument("--tag", default=None,
-                        help="Optional tag to append to the result directory name.")
+                        help="Optional tag appended to result dir as <timestamp>_<tag>.")
+    parser.add_argument("--comment", default=None,
+                        help="Free-text comment logged into results.json for "
+                             "downstream reporting/reference.")
     parser.add_argument(
         "--sweep_id",
         default=None,
@@ -579,12 +582,14 @@ def main():
     stage3c_metric = "mae_roi" if args.selection_metric in ("mae_roi", "cnr", "mixed") else "loss"
 
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    folder_name = timestamp
+    # Layout mirrors run_reconstruction.py:
+    #   data/joint_denoiser_recon/<sweep_id>/<dataset>/<timestamp>[_<tag>]/
+    # If no sweep_id, the sweep_id segment is omitted.
+    folder_name = f"{timestamp}_{args.tag}" if args.tag else timestamp
     if args.sweep_id:
-        folder_name += f"_{args.sweep_id}"
-    if args.tag:
-        folder_name += f"_{args.tag}"
-    run_dir = OUTPUT_DIR / args.dataset / folder_name
+        run_dir = OUTPUT_DIR / args.sweep_id / args.dataset / folder_name
+    else:
+        run_dir = OUTPUT_DIR / args.dataset / folder_name
     run_dir.mkdir(parents=True, exist_ok=True)
 
     denoise_cfg = dict(DEFAULT_DENOISE_CFG)
@@ -881,7 +886,7 @@ def main():
     # ── Save results JSON ────────────────────────────────────────────────
     results_json = {
         "timestamp": timestamp,
-        "tag": args.tag,
+        "comment": args.comment,
         "dataset": args.dataset,
         "mode": args.mode,
         "n_samples": len(indices),

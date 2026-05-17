@@ -554,6 +554,9 @@ def main():
     parser.add_argument("--job_name", default=None)
     parser.add_argument("--tag", default=None,
                         help="Optional tag to append to the result directory name.")
+    parser.add_argument("--comment", default=None,
+                        help="Free-text comment logged into results.json for "
+                             "downstream reporting/reference.")
     parser.add_argument("--oracle", action="store_true",
                         help="Run in supervised 'oracle' mode (direct GT capacity test).")
     parser.add_argument("--report_plots", action="store_true",
@@ -926,6 +929,7 @@ def main():
                     for r in all_results]
     results_json = {
         "timestamp": timestamp,
+        "comment": args.comment,
         "dataset": ds_cfg["key"],
         "sweep_id": args.sweep_id,
         "n_samples": len(indices),
