@@ -382,13 +382,21 @@ def _make_sample_plot(s_phys_np, s_gt_np, loss_history, idx, method, mtype,
 
 
 def _make_recon_grid(all_results, n_vis=2, rng_seed=42):
-    """Grid of reconstructions across all configs. Works with or without GT."""
+    """Grid of reconstructions across all configs. Works with or without GT.
+
+    Returns None if there are no per-sample entries to render (e.g. small-N
+    datasets where exclusion left nothing).
+    """
+    if not all_results or not all_results[0].get("per_sample"):
+        return None
     has_gt = all_results[0]["per_sample"][0].get("s_gt_np") is not None
 
     common_indices = set(s["idx"] for s in all_results[0]["per_sample"])
     for r in all_results[1:]:
         common_indices &= {s["idx"] for s in r["per_sample"]}
     common_indices = sorted(common_indices)
+    if not common_indices:
+        return None
 
     rng = np.random.default_rng(seed=rng_seed)
     n_pick = min(n_vis, len(common_indices))
@@ -525,13 +533,18 @@ def log_wandb_summary(all_results, entry, indices, run_tag, sweep_id, log,
     out_dir.mkdir(parents=True, exist_ok=True)
 
     log.info("  Rendering reconstruction grid ...")
-    fig_grid = _make_recon_grid(all_results, n_vis=2)
-    wandb.log({"reconstruction_grid": _fig_to_wandb_image(
-        fig_grid, "Reconstructions — 2 random samples")})
-    pdf_grid = out_dir / f"{run_tag}_recon_grid.pdf"
-    fig_grid.savefig(pdf_grid, dpi=150, bbox_inches="tight")
-    plt.close(fig_grid)
-    log.info(f"  Grid PDF → {pdf_grid}")
+    n_avail = len(all_results[0].get("per_sample", [])) if all_results else 0
+    n_vis = min(2, n_avail)
+    fig_grid = _make_recon_grid(all_results, n_vis=n_vis) if n_vis > 0 else None
+    if fig_grid is None:
+        log.warning("  Skipping reconstruction grid — no samples available to plot")
+    else:
+        wandb.log({"reconstruction_grid": _fig_to_wandb_image(
+            fig_grid, f"Reconstructions — {n_vis} random sample(s)")})
+        pdf_grid = out_dir / f"{run_tag}_recon_grid.pdf"
+        fig_grid.savefig(pdf_grid, dpi=150, bbox_inches="tight")
+        plt.close(fig_grid)
+        log.info(f"  Grid PDF → {pdf_grid}")
 
     wandb.finish()
 
