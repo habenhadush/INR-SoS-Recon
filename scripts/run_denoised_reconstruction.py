@@ -39,7 +39,8 @@ from inr_sos import DATA_DIR
 from inr_sos.utils.data import USDataset
 from inr_sos.utils.config import ExperimentConfig
 from inr_sos.evaluation.metrics import calculate_metrics
-from inr_sos.models.mlp import FourierMLP, ReluMLP, SirenMLP, GeluMLP
+from inr_sos.models.mlp import FourierMLP, ReluMLP, GeluMLP
+from inr_sos.models.siren import SirenMLP
 from inr_sos.training.engines import (
     optimize_full_forward_operator,
     optimize_sequential_views,
