@@ -639,13 +639,28 @@ def main():
             sweep_used: set[int] = set()
             log.info("  Sweep-index exclusion disabled (--no_exclude_sweep_samples)")
         else:
-            sweep_used = load_sweep_indices(
-                dataset_key=args.dataset,
-                sweep_id=args.sweep_id,
-                registry_path=SCRIPTS_DIR / "sweep_registry.json",
-            )
-            if sweep_used:
-                log.info(f"  Excluding {len(sweep_used)} sweep indices from pool")
+            # Only exclude when the sweep was registered on THIS dataset.
+            # Cross-dataset replay (e.g. blob sweep on phantom/breast) has no
+            # shared index space — the whole dataset is held-out by construction.
+            sweep_dataset = None
+            if args.sweep_id:
+                with open(SCRIPTS_DIR / "sweep_registry.json") as _f:
+                    for _e in json.load(_f):
+                        if _e.get("sweep_id", "").startswith(args.sweep_id):
+                            sweep_dataset = _e.get("dataset")
+                            break
+            if args.sweep_id and sweep_dataset != args.dataset:
+                sweep_used = set()
+                log.info(f"  Sweep ran on {sweep_dataset!r}, replaying on "
+                         f"{args.dataset!r} — no exclusion (held-out dataset)")
+            else:
+                sweep_used = load_sweep_indices(
+                    dataset_key=args.dataset,
+                    sweep_id=args.sweep_id,
+                    registry_path=SCRIPTS_DIR / "sweep_registry.json",
+                )
+                if sweep_used:
+                    log.info(f"  Excluding {len(sweep_used)} sweep indices from pool")
         n = args.n_samples if args.n_samples is not None else len(dataset)
         pool = [i for i in range(len(dataset)) if i not in sweep_used]
         indices = pool[: min(n, len(pool))]

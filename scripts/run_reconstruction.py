@@ -666,6 +666,10 @@ def main():
         if args.no_exclude_sweep_samples:
             used = set()
             log.info("Sweep-index exclusion disabled (--no_exclude_sweep_samples)")
+        elif entry.get("dataset") != ds_cfg["key"]:
+            used = set()
+            log.info(f"Sweep ran on {entry.get('dataset')!r}, replaying on "
+                     f"{ds_cfg['key']!r} — no exclusion (held-out dataset)")
         else:
             used = get_used_indices(entry)
             log.info(f"Previously used: {len(used)} indices — excluded")
