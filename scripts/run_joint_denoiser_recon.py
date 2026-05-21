@@ -563,6 +563,17 @@ def main():
         help="For --selection_metric mixed: 'n,m' where n+m==top_k. "
              "n configs ranked by MAE_roi, m by CNR (deduped, filled).",
     )
+    parser.add_argument(
+        "--stage3c_checkpoint", default="auto",
+        choices=["auto", "oracle", "honest"],
+        help="Stage-3c checkpoint criterion, DECOUPLED from --selection_metric "
+             "(which only ranks the top-K configs). "
+             "'auto' = derive from --selection_metric (legacy: mae_roi/cnr/mixed "
+             "-> oracle, loss -> honest). "
+             "'oracle' = GT-aware best-MAE_roi iterate. "
+             "'honest' = lowest training loss, no GT. "
+             "Use oracle/honest to get a same-config honest-vs-oracle pair.",
+    )
     args = parser.parse_args()
 
     # Parse --mixed_split if present
@@ -578,8 +589,17 @@ def main():
         if args.top_k is None or sum(mixed_split) != args.top_k:
             parser.error(f"--mixed_split {mixed_split} must sum to --top_k ({args.top_k})")
 
-    # Stage 3c checkpoint criterion: any GT-aware sweep ranking uses mae_roi oracle
-    stage3c_metric = "mae_roi" if args.selection_metric in ("mae_roi", "cnr", "mixed") else "loss"
+    # Stage 3c checkpoint criterion. --stage3c_checkpoint overrides --selection_metric:
+    #   auto   -> legacy derivation (GT-aware ranking implies oracle checkpoint)
+    #   oracle -> force GT-aware best-MAE_roi checkpoint
+    #   honest -> force lowest-training-loss checkpoint (no GT)
+    if args.stage3c_checkpoint == "oracle":
+        stage3c_metric = "mae_roi"
+    elif args.stage3c_checkpoint == "honest":
+        stage3c_metric = "loss"
+    else:  # auto
+        stage3c_metric = ("mae_roi" if args.selection_metric in ("mae_roi", "cnr", "mixed")
+                          else "loss")
 
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     # Layout mirrors run_reconstruction.py:
@@ -906,6 +926,12 @@ def main():
         "mode": args.mode,
         "n_samples": len(indices),
         "indices": indices,
+        "selection_metric": args.selection_metric,
+        "stage3c_checkpoint": args.stage3c_checkpoint,   # CLI: auto/oracle/honest
+        # Definitive answer for downstream reporting: did Stage 3c use a
+        # GT-aware checkpoint ("oracle") or lowest-training-loss ("honest")?
+        "stage3c_checkpoint_resolved": ("oracle" if stage3c_metric == "mae_roi"
+                                        else "honest"),
         "methods": {},
         "baselines": {},
     }
