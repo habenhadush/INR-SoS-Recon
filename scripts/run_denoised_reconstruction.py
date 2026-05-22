@@ -839,6 +839,19 @@ def main():
         with open(results_path, "w") as f:
             json.dump(results_json, f, indent=2, default=str)
         log.info(f"\n  Results saved → {results_path}")
+
+        # Per-sample reconstructed slowness arrays for figure builders.
+        from inr_sos.evaluation.recon_export import save_recons_npz
+        recons_by_method = {
+            method: [r["s_phys"] for r in per]
+            for method, per in all_results.items()
+        }
+        npz_path = save_recons_npz(
+            run_dir / "recons.npz", indices,
+            gt_slowness=[dataset[idx]["s_gt_raw"] for idx in indices],
+            recons_by_method=recons_by_method,
+        )
+        log.info(f"  Recon arrays saved → {npz_path}")
         log.info(f"  Experiment complete. All outputs in {run_dir}")
         return
 

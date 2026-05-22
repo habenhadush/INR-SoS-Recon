@@ -962,6 +962,26 @@ def main():
         json.dump(results_json, f, indent=2)
     log.info(f"  Results JSON -> {plot_dir / 'results.json'}")
 
+    # Per-sample reconstructed slowness arrays for downstream figure builders.
+    if has_gt and all_results and all_results[0].get("per_sample"):
+        from inr_sos.evaluation.recon_export import save_recons_npz
+        recons_by_method = {}
+        for result in all_results:
+            rank_val = result.get("rank")
+            label = (f"rank#{rank_val} {result['method']}"
+                     if rank_val is not None else result["method"])
+            recons_by_method[label] = [e["s_phys_np"]
+                                       for e in result["per_sample"]]
+        if samples_loaded is not None:
+            for sample_key, label in [("s_l1_recon", "L1"), ("s_l2_recon", "L2")]:
+                if sample_key in samples_loaded[0]:
+                    recons_by_method[label] = [s[sample_key]
+                                               for s in samples_loaded]
+        gt_slowness = [e["s_gt_np"] for e in all_results[0]["per_sample"]]
+        npz_path = save_recons_npz(plot_dir / "recons.npz", indices,
+                                   gt_slowness, recons_by_method)
+        log.info(f"  Recon arrays -> {npz_path}")
+
     # ── Registry ──────────────────────────────────────────────────────────
     for e in registry:
         if e["sweep_id"].startswith(args.sweep_id):
