@@ -92,15 +92,26 @@ def compute_mismatch(path, L, n_samples=None):
 # ─── Figure 1: residual heatmap ──────────────────────────────────────────────
 
 def fig_heatmap(mismatch_by_ds, sample_idx, save_path):
-    """Signed residual e per firing pair, one row per dataset."""
+    """Signed residual e per firing pair, one row per dataset.
+
+    Single shared colorbar across all panels: vmax = max 95th-percentile of
+    |e| across both datasets, so geom and blob are on the same scale.
+    """
     n_ds = len(mismatch_by_ds)
     fig, axes = plt.subplots(n_ds, N_PAIRS, figsize=(2.0 * N_PAIRS, 2.2 * n_ds),
                              squeeze=False)
+    # One shared vmax across all rows for a single colorbar.
+    vmax = 0.0
+    for _, mm in mismatch_by_ds.items():
+        eps = mm[sample_idx]["epsilon"]
+        valid = mm[sample_idx]["mask"] > 0.5
+        if valid.sum():
+            vmax = max(vmax, float(np.percentile(np.abs(eps[valid]), 95)))
+    if vmax == 0.0:
+        vmax = 1e-7
+    im = None
     for row, (label, mm) in enumerate(mismatch_by_ds.items()):
         eps = mm[sample_idx]["epsilon"]
-        mask = mm[sample_idx]["mask"]
-        valid = mask > 0.5
-        vmax = np.percentile(np.abs(eps[valid]), 95) if valid.sum() else 1e-7
         for p in range(N_PAIRS):
             sl = slice(p * PAIR_SIZE, (p + 1) * PAIR_SIZE)
             eps_img = eps[sl].reshape(DT, DT, order="F")
@@ -112,18 +123,20 @@ def fig_heatmap(mismatch_by_ds, sample_idx, save_path):
                 ax.set_title(f"Pair {p}")
             if p == 0:
                 ax.set_ylabel(label, fontsize=10, fontweight="bold")
-        cbar = fig.colorbar(im, ax=axes[row, :].tolist(),
-                            fraction=0.012, pad=0.01)
-        cbar.ax.tick_params(labelsize=7)
-    fig.suptitle(r"Forward-model residual  $e = L\,s_{GT} - d_{kwave}$  "
-                 f"(sample {sample_idx})", fontsize=11, fontweight="bold")
+    cbar = fig.colorbar(im, ax=axes.ravel().tolist(),
+                        fraction=0.012, pad=0.01)
+    cbar.ax.tick_params(labelsize=7)
     _save(fig, save_path)
 
 
 # ─── Figure 2: residual spectrum ─────────────────────────────────────────────
 
 def fig_spectrum(mismatch_by_ds, sample_idx, save_path):
-    """2D log-magnitude spatial-frequency spectrum of e per firing pair."""
+    """2D log-magnitude spatial-frequency spectrum of e per firing pair.
+
+    Single shared colorbar across all panels (max log-magnitude across both
+    datasets); per-cell LF fraction annotation retained.
+    """
     n_ds = len(mismatch_by_ds)
     fig, axes = plt.subplots(n_ds, N_PAIRS, figsize=(2.0 * N_PAIRS, 2.2 * n_ds),
                              squeeze=False)
@@ -131,7 +144,11 @@ def fig_spectrum(mismatch_by_ds, sample_idx, save_path):
     Y, X = np.ogrid[:DT, :DT]
     r = np.sqrt((X - cx) ** 2 + (Y - cy) ** 2)
     low_mask = r <= 16
-    for row, (label, mm) in enumerate(mismatch_by_ds.items()):
+
+    # First pass: compute all log-magnitudes + LF fractions.
+    panels = []  # (row, col, log_mag, low_frac)
+    vmax = 0.0
+    for row, (_, mm) in enumerate(mismatch_by_ds.items()):
         eps = mm[sample_idx]["epsilon"]
         mask = mm[sample_idx]["mask"]
         for p in range(N_PAIRS):
@@ -139,25 +156,29 @@ def fig_spectrum(mismatch_by_ds, sample_idx, save_path):
             eps_img = eps[sl].reshape(DT, DT, order="F")
             mask_img = mask[sl].reshape(DT, DT, order="F")
             mag = np.abs(np.fft.fftshift(np.fft.fft2(eps_img * mask_img)))
-            low_frac = (np.sum(mag[low_mask] ** 2)
-                        / (np.sum(mag ** 2) + 1e-30))
-            ax = axes[row, p]
-            im = ax.imshow(np.log1p(mag), cmap="viridis",
-                           interpolation="nearest")
-            ax.set_xticks([]); ax.set_yticks([])
-            if row == 0:
-                ax.set_title(f"Pair {p}")
-            if p == 0:
-                ax.set_ylabel(label, fontsize=10, fontweight="bold")
-            ax.text(0.5, -0.13, f"LF {low_frac:.0%}", transform=ax.transAxes,
-                    ha="center", va="top", fontsize=7)
-        cbar = fig.colorbar(im, ax=axes[row, :].tolist(),
-                            fraction=0.012, pad=0.01)
-        cbar.ax.tick_params(labelsize=7)
-    fig.suptitle(r"Spatial-frequency spectrum of the residual  "
-                 r"$\log(1+|\mathcal{F}\{e\}|)$  "
-                 f"(sample {sample_idx}; LF = energy within r$\\leq$16 px)",
-                 fontsize=11, fontweight="bold")
+            log_mag = np.log1p(mag)
+            low_frac = (float(np.sum(mag[low_mask] ** 2))
+                        / (float(np.sum(mag ** 2)) + 1e-30))
+            vmax = max(vmax, float(log_mag.max()))
+            panels.append((row, p, log_mag, low_frac))
+
+    # Second pass: draw with shared vmin=0 / vmax = max across all panels.
+    im = None
+    for row, p, log_mag, low_frac in panels:
+        ax = axes[row, p]
+        im = ax.imshow(log_mag, cmap="viridis", vmin=0.0, vmax=vmax,
+                       interpolation="nearest")
+        ax.set_xticks([]); ax.set_yticks([])
+        if row == 0:
+            ax.set_title(f"Pair {p}")
+        if p == 0:
+            label = list(mismatch_by_ds.keys())[row]
+            ax.set_ylabel(label, fontsize=10, fontweight="bold")
+        ax.text(0.5, -0.13, f"LF {low_frac:.0%}", transform=ax.transAxes,
+                ha="center", va="top", fontsize=7)
+    cbar = fig.colorbar(im, ax=axes.ravel().tolist(),
+                        fraction=0.012, pad=0.01)
+    cbar.ax.tick_params(labelsize=7)
     _save(fig, save_path)
 
 
@@ -191,10 +212,11 @@ def fig_per_pair(mismatch_by_ds, save_path):
     ax.set_xticks(x + width * (len(mismatch_by_ds) - 1) / 2)
     ax.set_xticklabels([f"Pair {p}" for p in range(N_PAIRS)])
     ax.set_ylabel(r"share of $\|e\|^2$  (%)")
-    ax.set_title("Residual energy localization by firing pair",
-                 fontsize=11, fontweight="bold")
-    ax.legend(fontsize=8)
+    # Legend outside the plot area (right side) so it never overlaps the bars.
+    ax.legend(fontsize=8, loc="upper left", bbox_to_anchor=(1.01, 1.0),
+              borderaxespad=0.0, frameon=False)
     ax.grid(axis="y", alpha=0.3)
+    fig.tight_layout()
     _save(fig, save_path)
 
 
