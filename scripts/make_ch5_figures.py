@@ -135,6 +135,9 @@ _REPO = Path(__file__).resolve().parent.parent
 _DAT  = _REPO / "scripts" / "data"
 
 SOURCES: dict[str, str | None] = {
+    # §5.1 — IC PoC: self-supervised (uses L) vs oracle direct supervision (no L)
+    "hqt6bwmp_ic_self":          str(_DAT / "inr/hqt6bwmp/inverse_crime/20260527_103124_npz"),
+    "hqt6bwmp_ic_oracle":        str(_DAT / "inr/hqt6bwmp/inverse_crime/20260527_103336_npz-oracle"),
     # J3 / J4 — standalone INR reconstruction, IC-tuned vs blob-tuned
     "hqt6bwmp_blob_recon":       str(_DAT / "inr/hqt6bwmp/kwave_blob/20260523_095624_npz"),
     "ti60qmx3_geom_recon":       str(_DAT / "inr/ti60qmx3/kwave_geom/20260523_095636_npz"),
@@ -563,7 +566,7 @@ def _draw_recon_grid(
         cb.set_label("SoS (m/s)", fontsize=8, labelpad=4)
         cb.ax.tick_params(labelsize=7)
 
-        p.save(fig, save_path, png_fallback=True)
+        p.save(fig, save_path, png_fallback=False)
         plt.close(fig)
 
     print(f"  [grid] saved -> {save_path.with_suffix('.svg')}")
@@ -572,6 +575,248 @@ def _draw_recon_grid(
 # ──────────────────────────────────────────────────────────────────────────────
 # Helper: select column indices evenly from a dataset
 # ──────────────────────────────────────────────────────────────────────────────
+
+def _draw_combined_dataset_grid(
+    panels,
+    row_labels,
+    save_path: Path,
+    *,
+    figwidth: float = 11.0,
+    cmap: str = "RdBu_r",
+    annotate_mae_cnr: bool = True,
+) -> None:
+    """One reconstruction grid with multiple column-groups SIDE-BY-SIDE.
+
+    Each column-group ("panel") has its own header title (e.g. "GeomSet",
+    "BlobSet") and is separated from the next by a vertical dashed line.
+    All groups share the row dimension and a single colorbar.
+
+    panels: list of (dataset_title, col_labels, rows_imgs)
+        rows_imgs[r] is the list of images for row r in this panel; row 0 is
+        treated as GT (used for shared diverging norm + MAE/CNR baseline).
+    row_labels: ["GT", "Standalone", ...]  (must equal len(rows_imgs))
+    """
+    from matplotlib.lines import Line2D
+
+    p = _get_p()
+    n_panels = len(panels)
+    n_rows = len(row_labels)
+    panel_widths = [len(cl) for _, cl, _ in panels]
+    sep_count = max(0, n_panels - 1)
+
+    # Shared diverging norm across all GT images in all panels.
+    all_gt = [img for _, _, rows in panels for img in rows[0]]
+    shared_norm = _shared_norm(all_gt) if all_gt else None
+
+    # Build the column width-ratio sequence: data cols (1.0) + thin spacers
+    # (0.18) between panels + colorbar (0.4) at the end.
+    width_ratios: list[float] = []
+    col_map: dict[tuple[int, int], int] = {}
+    cur = 0
+    for pi, w in enumerate(panel_widths):
+        if pi > 0:
+            width_ratios.append(0.18)
+            cur += 1
+        for ci in range(w):
+            width_ratios.append(1.0)
+            col_map[(pi, ci)] = cur
+            cur += 1
+    cb_col = cur
+    width_ratios.append(0.45)
+
+    total_units = sum(width_ratios)
+    cell_h = figwidth / total_units
+    fig_h = cell_h * n_rows + 0.7
+
+    with matplotlib.rc_context(p.SERIF_RCPARAMS):
+        fig = plt.figure(figsize=(figwidth, fig_h))
+        fig.patch.set_facecolor("white")
+
+        gs = fig.add_gridspec(
+            n_rows, len(width_ratios),
+            width_ratios=width_ratios,
+            hspace=0.04, wspace=0.03,
+            left=0.05, right=0.97, top=0.91, bottom=0.04,
+        )
+
+        for pi, (_, col_labels, rows) in enumerate(panels):
+            gt_imgs = rows[0]
+            for r in range(n_rows):
+                for c in range(panel_widths[pi]):
+                    ax = fig.add_subplot(gs[r, col_map[(pi, c)]])
+                    img = rows[r][c]
+                    ax.imshow(img, cmap=cmap, norm=shared_norm,
+                              interpolation="nearest", origin="upper")
+                    ax.set_xticks([]); ax.set_yticks([])
+                    for sp in ax.spines.values():
+                        sp.set_linewidth(0.4)
+                    if r == 0:
+                        ax.set_title(col_labels[c], fontsize=7, pad=2)
+                    if c == 0 and pi == 0:
+                        ax.set_ylabel(row_labels[r], fontsize=8, rotation=0,
+                                      labelpad=20, va="center")
+                    if annotate_mae_cnr and r > 0 and c < len(gt_imgs):
+                        mae, cnr = _mae_cnr(img, gt_imgs[c])
+                        p.annotate_cell(
+                            ax, f"MAE: {mae:.1f}\nCNR: {cnr:.2f}", fontsize=5,
+                        )
+
+        # Panel header titles, centred above each group
+        for pi, (title, _, _) in enumerate(panels):
+            left_ss  = gs[0, col_map[(pi, 0)]].get_position(fig)
+            right_ss = gs[0, col_map[(pi, panel_widths[pi] - 1)]].get_position(fig)
+            x_center = (left_ss.x0 + right_ss.x1) / 2
+            fig.text(
+                x_center, left_ss.y1 + 0.025, title,
+                ha="center", va="bottom", fontsize=11, fontweight="bold",
+            )
+
+        # Dashed vertical separators between panels
+        for pi in range(1, n_panels):
+            # spacer column index = right boundary of previous panel + 1
+            sep_gs_col = col_map[(pi, 0)] - 1
+            sep_ss = gs[0, sep_gs_col].get_position(fig)
+            x_sep = (sep_ss.x0 + sep_ss.x1) / 2
+            top_ss = gs[0, col_map[(pi, 0)]].get_position(fig)
+            bot_ss = gs[n_rows - 1, col_map[(pi, 0)]].get_position(fig)
+            line = Line2D(
+                [x_sep, x_sep], [bot_ss.y0, top_ss.y1],
+                transform=fig.transFigure, color="black",
+                linestyle="--", linewidth=0.8, alpha=0.55,
+            )
+            fig.add_artist(line)
+
+        # Shared colorbar
+        cb_ax = fig.add_subplot(gs[:, cb_col])
+        sm = plt.cm.ScalarMappable(cmap=cmap, norm=shared_norm)
+        sm.set_array([])
+        cb = fig.colorbar(sm, cax=cb_ax)
+        cb.set_label("SoS (m/s)", fontsize=8, labelpad=4)
+        cb.ax.tick_params(labelsize=7)
+
+        p.save(fig, save_path, png_fallback=False)
+        plt.close(fig)
+    print(f"  [combined-grid] saved -> {save_path.with_suffix('.svg')}")
+
+
+def _draw_combined_metrics(
+    geom_results: dict[str, list[dict]],
+    blob_results: dict[str, list[dict]],
+    save_path: Path,
+    *,
+    metrics: tuple[str, ...] = ("MAE", "RMSE", "SSIM", "CNR"),
+    figwidth: float = 11.0,
+    fig_height: float = 3.2,
+    short_labels: list[str] | None = None,
+    group_labels: tuple[str, str] = ("GeomSet", "BlobSet"),
+) -> None:
+    """4-metric box-plot figure split left | right by a dashed line.
+
+    Method ordering MUST be identical in geom_results and blob_results.
+    INR-method x-labels default to numeric ranks 1, 2, ... ; baselines keep
+    "L1"/"L2". Caller may pass an explicit ``short_labels`` list to override.
+    The full method legend belongs in the LaTeX caption (no in-figure legend).
+    """
+    p = _get_p()
+    method_names = list(geom_results.keys())
+    if list(blob_results.keys()) != method_names:
+        raise ValueError("geom and blob results must have identical methods/order")
+
+    metric_titles = {"MAE": "MAE (m/s)", "RMSE": "RMSE (m/s)",
+                     "SSIM": "SSIM", "CNR": "CNR"}
+
+    # Resolve x-axis short labels and per-method colors.
+    if short_labels is None:
+        short_labels = []
+        inr_idx = 0
+        for lbl in method_names:
+            if lbl in ("L1", "L2", "PI"):
+                short_labels.append(lbl)
+            else:
+                inr_idx += 1
+                short_labels.append(str(inr_idx))
+    if len(short_labels) != len(method_names):
+        raise ValueError("short_labels length must match method_names")
+
+    method_colors: dict[str, str] = {}
+    inr_color_idx = 0
+    for lbl in method_names:
+        if lbl in ("L1", "L2", "PI"):
+            method_colors[lbl] = "#888888"
+        else:
+            method_colors[lbl] = p.WONG[1 + inr_color_idx % (len(p.WONG) - 1)]
+            inr_color_idx += 1
+
+    n = len(method_names)
+    sep = 1.2                                    # spacer between geom and blob
+    x_geom = np.arange(1, n + 1, dtype=float)
+    x_blob = x_geom + n + sep
+    x_sep  = (x_geom[-1] + x_blob[0]) / 2.0
+
+    def _vals(res, lbl, mk):
+        v = [r["metrics"][mk] for r in res[lbl] if mk in r.get("metrics", {})]
+        return v if v else [float("nan")]
+
+    with matplotlib.rc_context(p.SERIF_RCPARAMS):
+        fig, axes = plt.subplots(1, len(metrics),
+                                 figsize=(figwidth, fig_height),
+                                 sharey=False)
+        if len(metrics) == 1:
+            axes = [axes]
+
+        for ax, mk in zip(axes, metrics):
+            data_g = [_vals(geom_results, lbl, mk) for lbl in method_names]
+            data_b = [_vals(blob_results, lbl, mk) for lbl in method_names]
+
+            common_box_kw = dict(
+                widths=0.55, patch_artist=True, notch=False,
+                medianprops=dict(color="black", linewidth=1.2),
+                whiskerprops=dict(linewidth=0.7),
+                capprops=dict(linewidth=0.7),
+                flierprops=dict(marker="o", markersize=2.5,
+                                markerfacecolor="none", markeredgewidth=0.5),
+                boxprops=dict(linewidth=0.5),
+            )
+            bp_g = ax.boxplot(data_g, positions=x_geom, **common_box_kw)
+            bp_b = ax.boxplot(data_b, positions=x_blob, **common_box_kw)
+            for patch, lbl in zip(bp_g["boxes"], method_names):
+                patch.set_facecolor(method_colors[lbl]); patch.set_alpha(0.65)
+            for patch, lbl in zip(bp_b["boxes"], method_names):
+                patch.set_facecolor(method_colors[lbl]); patch.set_alpha(0.65)
+
+            # Dashed vertical separator
+            ax.axvline(x_sep, color="black", linestyle="--",
+                       linewidth=0.8, alpha=0.55)
+
+            ax.set_xticks(list(x_geom) + list(x_blob))
+            ax.set_xticklabels(short_labels * 2, fontsize=6.5)
+            ax.set_title(metric_titles.get(mk, mk), fontsize=9, pad=14)
+            ax.spines["top"].set_visible(False)
+            ax.spines["right"].set_visible(False)
+            ax.tick_params(which="both", direction="in", width=0.5,
+                           labelsize=6.5)
+            ax.grid(axis="y", linewidth=0.4, linestyle="--", alpha=0.5,
+                    zorder=0)
+
+            # Group headers above each half (in axes coordinates so they sit
+            # right under the metric title and don't depend on the y-range).
+            mid_g = (x_geom[0] + x_geom[-1]) / 2
+            mid_b = (x_blob[0] + x_blob[-1]) / 2
+            xmin = x_geom[0] - 0.6
+            xmax = x_blob[-1] + 0.6
+            ax.set_xlim(xmin, xmax)
+            ax.text((mid_g - xmin) / (xmax - xmin), 1.02, group_labels[0],
+                    transform=ax.transAxes, ha="center", va="bottom",
+                    fontsize=8, fontweight="bold")
+            ax.text((mid_b - xmin) / (xmax - xmin), 1.02, group_labels[1],
+                    transform=ax.transAxes, ha="center", va="bottom",
+                    fontsize=8, fontweight="bold")
+
+        fig.tight_layout(pad=0.6)
+        p.save(fig, save_path, png_fallback=False)
+        plt.close(fig)
+    print(f"  [combined-metrics] saved -> {save_path.with_suffix('.svg')}")
+
 
 def _col_indices(n_total: int, n_want: int) -> list[int]:
     """Return n_want indices evenly spread over [0, n_total)."""
@@ -590,56 +835,66 @@ def figure_J3() -> None:
     Box   : MAE/RMSE/SSIM/CNR — 7 methods (rank#1-5, L2, L1)
     Source: hqt6bwmp on kwave_blob (IC-tuned INR applied to blob)
     """
-    print("\n[J3] Building IC-transfer blob figures ...")
-    p    = _get_p()
-    dirs = _require_sources("hqt6bwmp_blob_recon")
-    run_dir = dirs["hqt6bwmp_blob_recon"]
-    data = _load_npz(run_dir, "hqt6bwmp_blob_recon")
+    print("\n[J3] Building IC-transfer combined figures ...")
+    dirs = _require_sources("hqt6bwmp_geom_recon", "hqt6bwmp_blob_recon")
+    g_run = dirs["hqt6bwmp_geom_recon"]
+    b_run = dirs["hqt6bwmp_blob_recon"]
+    g_data = _load_npz(g_run, "hqt6bwmp_geom_recon")
+    b_data = _load_npz(b_run, "hqt6bwmp_blob_recon")
 
-    n_cols  = min(8, len(data["gt"]))
-    c_idx   = _col_indices(len(data["gt"]), n_cols)
-    gt_imgs = [_to_sos_img(data["gt"][i]) for i in c_idx]
-    norm    = _shared_norm(gt_imgs)
+    def _build_panel(title, data):
+        n = len(data["gt"])
+        col_labels = _col_headers(n)
+        gt_imgs = [_to_sos_img(data["gt"][i]) for i in range(n)]
+        rows_imgs = [gt_imgs]                # row 0 = GT
+        for r in range(1, 4):                # top-3 (chapter-wide standard)
+            try:
+                _, arr = _pick_rank(data["recons"], r)
+                rows_imgs.append([_to_sos_img(arr[i]) for i in range(n)])
+            except KeyError:
+                rows_imgs.append([np.full_like(gt_imgs[0], np.nan)
+                                  for _ in gt_imgs])
+        for baseline in ("L2", "L1"):
+            if baseline in data["recons"]:
+                arr = data["recons"][baseline]
+                rows_imgs.append([_to_sos_img(arr[i]) for i in range(n)])
+            else:
+                rows_imgs.append([np.full_like(gt_imgs[0], np.nan)
+                                  for _ in gt_imgs])
+        return (title, col_labels, rows_imgs)
 
-    # Build rows: GT, rank#1..5, L2, L1
-    row_specs: list[tuple[str, list[np.ndarray]]] = [("GT", gt_imgs)]
-    metrics_entries: list[tuple[str, list[dict]]] = []
-
-    for r in range(1, 6):
-        try:
-            lbl, arr = _pick_rank(data["recons"], r)
-        except KeyError:
-            print(f"  [J3] rank#{r} not found — skipping")
-            continue
-        row_specs.append((f"R{r}", [_to_sos_img(arr[i]) for i in c_idx]))
-        metrics_entries.append(
-            _build_results_entry(f"R{r}", data, lbl, run_dir)
-        )
-
-    for baseline in ("L2", "L1"):
-        if baseline in data["recons"]:
-            arr = data["recons"][baseline]
-            row_specs.append((baseline, [_to_sos_img(arr[i]) for i in c_idx]))
-            metrics_entries.append(
-                _build_results_entry(baseline, data, baseline, run_dir)
-            )
-
-    _draw_recon_grid(
-        row_specs, _col_headers(n_cols),
-        save_path=_FIG_DIR / "5.2_v1_ictrans_blob_comparison.svg",
-        shared_norm=norm,
-        gt_images=gt_imgs,
-        dataset_title="BlobSet",
+    panels = [
+        _build_panel("GeomSet", g_data),
+        _build_panel("BlobSet", b_data),
+    ]
+    _draw_combined_dataset_grid(
+        panels,
+        row_labels=["GT", "1", "2", "3", "L2", "L1"],
+        save_path=_FIG_DIR / "5.2_v1_ictrans_grid.svg",
     )
 
-    results_dict = dict(metrics_entries)
-    with matplotlib.rc_context(p.SERIF_RCPARAMS):
-        p.plot_metrics_comparison(
-            results=results_dict,
-            save_path=_FIG_DIR / "5.2_v1_ictrans_blob_metrics.svg",
-            show=False,
-            png_fallback=True,
-        )
+    # Combined metrics figure
+    def _build_results(data, run_dir):
+        entries: list[tuple[str, list[dict]]] = []
+        for r in range(1, 4):                # top-3 (chapter-wide standard)
+            try:
+                lbl, _ = _pick_rank(data["recons"], r)
+                entries.append(_build_results_entry(f"R{r}", data, lbl, run_dir))
+            except KeyError:
+                pass
+        for baseline in ("L2", "L1"):
+            if baseline in data["recons"]:
+                entries.append(
+                    _build_results_entry(baseline, data, baseline, run_dir)
+                )
+        return dict(entries)
+
+    geom_res = _build_results(g_data, g_run)
+    blob_res = _build_results(b_data, b_run)
+    _draw_combined_metrics(
+        geom_res, blob_res,
+        save_path=_FIG_DIR / "5.2_v1_ictrans_metrics.svg",
+    )
     print("  [J3] done.")
 
 
@@ -653,89 +908,88 @@ def figure_J4() -> None:
     Grid : 5 rows × 8 cols — GT, ti60qmx3 rank#1, hqt6bwmp rank#1, L2, L1
     Box  : 8 boxes — ti60qmx3 rank#1-5, hqt6bwmp rank#1, L2, L1
     """
-    print("\n[J4] Building re-tune transfer figures ...")
-    p    = _get_p()
+    print("\n[J4] Building re-tune transfer combined figures ...")
     dirs = _require_sources(
         "ti60qmx3_geom_recon", "hqt6bwmp_geom_recon",
         "ti60qmx3_blob_recon", "hqt6bwmp_blob_recon",
     )
+    self_g = _load_npz(dirs["ti60qmx3_geom_recon"], "ti60qmx3_geom_recon")
+    self_b = _load_npz(dirs["ti60qmx3_blob_recon"], "ti60qmx3_blob_recon")
+    ic_g   = _load_npz(dirs["hqt6bwmp_geom_recon"], "hqt6bwmp_geom_recon")
+    ic_b   = _load_npz(dirs["hqt6bwmp_blob_recon"], "hqt6bwmp_blob_recon")
 
-    for ds_tag, self_key, ic_key in [
-        ("geom", "ti60qmx3_geom_recon", "hqt6bwmp_geom_recon"),
-        ("blob", "ti60qmx3_blob_recon", "hqt6bwmp_blob_recon"),
-    ]:
-        print(f"  [J4/{ds_tag}] loading ...")
-        self_data = _load_npz(dirs[self_key], self_key)
-        ic_data   = _load_npz(dirs[ic_key],  ic_key)
+    def _grid_panel(title, self_data, ic_data):
+        n = len(self_data["gt"])
+        col_labels = _col_headers(n)
+        gt_imgs = [_to_sos_img(self_data["gt"][i]) for i in range(n)]
 
-        n_cols  = min(8, len(self_data["gt"]))
-        c_idx   = _col_indices(len(self_data["gt"]), n_cols)
-        gt_imgs = [_to_sos_img(self_data["gt"][i]) for i in c_idx]
-        norm    = _shared_norm(gt_imgs)
+        def _row_from(arr):
+            return [_to_sos_img(arr[i]) for i in range(min(n, len(arr)))]
 
-        row_specs: list[tuple[str, list[np.ndarray]]] = [("GT", gt_imgs)]
-        metrics_entries: list[tuple[str, list[dict]]] = []
-
-        # blob/geom-tuned (self): rank#1
         try:
-            lbl_s, arr_s = _pick_rank(self_data["recons"], 1)
-            row_specs.append(("ti60 R1", [_to_sos_img(arr_s[i]) for i in c_idx]))
+            _, arr_s = _pick_rank(self_data["recons"], 1)
+            row_self = _row_from(arr_s)
         except KeyError:
-            print(f"  [J4/{ds_tag}] ti60qmx3 rank#1 not found")
-            lbl_s = None
-
-        # IC-tuned: rank#1 (applied to this dataset)
-        ic_c_idx = _col_indices(len(ic_data["gt"]), n_cols)
+            row_self = [np.full_like(gt_imgs[0], np.nan) for _ in gt_imgs]
         try:
-            lbl_ic, arr_ic = _pick_rank(ic_data["recons"], 1)
-            row_specs.append(("hqt6 R1", [_to_sos_img(arr_ic[i]) for i in ic_c_idx]))
+            _, arr_ic = _pick_rank(ic_data["recons"], 1)
+            row_ic = _row_from(arr_ic)
         except KeyError:
-            print(f"  [J4/{ds_tag}] hqt6bwmp rank#1 not found")
-            lbl_ic = None
+            row_ic = [np.full_like(gt_imgs[0], np.nan) for _ in gt_imgs]
+        row_L2 = (_row_from(self_data["recons"]["L2"])
+                  if "L2" in self_data["recons"]
+                  else [np.full_like(gt_imgs[0], np.nan) for _ in gt_imgs])
+        row_L1 = (_row_from(self_data["recons"]["L1"])
+                  if "L1" in self_data["recons"]
+                  else [np.full_like(gt_imgs[0], np.nan) for _ in gt_imgs])
+        return (title, col_labels, [gt_imgs, row_self, row_ic, row_L2, row_L1])
 
-        for baseline in ("L2", "L1"):
-            if baseline in self_data["recons"]:
-                arr = self_data["recons"][baseline]
-                row_specs.append((baseline, [_to_sos_img(arr[i]) for i in c_idx]))
+    panels = [
+        _grid_panel("GeomSet", self_g, ic_g),
+        _grid_panel("BlobSet", self_b, ic_b),
+    ]
+    _draw_combined_dataset_grid(
+        panels,
+        row_labels=["GT", "k-Wave\nR1", "IC\nR1", "L2", "L1"],
+        save_path=_FIG_DIR / "5.2_retune_grid.svg",
+    )
 
-        _draw_recon_grid(
-            row_specs, _col_headers(n_cols),
-            save_path=_FIG_DIR / f"5.2_retune_grid_{ds_tag}.svg",
-            shared_norm=norm,
-            gt_images=gt_imgs,
-            dataset_title=("GeomSet" if ds_tag == "geom" else "BlobSet"),
-        )
-
-        # Metrics: ti60qmx3 rank#1-5 + hqt6bwmp rank#1 + L2 + L1
+    # Combined metrics: ti60qmx3 rank#1-5 + hqt6bwmp rank#1 + L2 + L1
+    def _build_results(self_data, ic_data, self_run, ic_run):
+        entries: list[tuple[str, list[dict]]] = []
         for r in range(1, 6):
             try:
                 lbl_r, _ = _pick_rank(self_data["recons"], r)
-                metrics_entries.append(
-                    _build_results_entry(f"ti60 R{r}", self_data, lbl_r, dirs[self_key])
+                entries.append(
+                    _build_results_entry(f"k-Wave R{r}", self_data, lbl_r, self_run)
                 )
             except KeyError:
                 pass
-
-        if lbl_ic is not None:
-            metrics_entries.append(
-                _build_results_entry("hqt6 R1", ic_data, lbl_ic, dirs[ic_key])
-            )
-
+        try:
+            lbl_ic, _ = _pick_rank(ic_data["recons"], 1)
+            entries.append(_build_results_entry("IC R1", ic_data, lbl_ic, ic_run))
+        except KeyError:
+            pass
         for baseline in ("L2", "L1"):
             if baseline in self_data["recons"]:
-                metrics_entries.append(
-                    _build_results_entry(baseline, self_data, baseline, dirs[self_key])
+                entries.append(
+                    _build_results_entry(baseline, self_data, baseline, self_run)
                 )
+        return dict(entries)
 
-        results_dict = dict(metrics_entries)
-        with matplotlib.rc_context(p.SERIF_RCPARAMS):
-            p.plot_metrics_comparison(
-                results=results_dict,
-                save_path=_FIG_DIR / f"5.2_retune_metrics_{ds_tag}.svg",
-                show=False,
-                png_fallback=True,
-            )
-        print(f"  [J4/{ds_tag}] done.")
+    geom_res = _build_results(self_g, ic_g, dirs["ti60qmx3_geom_recon"],
+                              dirs["hqt6bwmp_geom_recon"])
+    blob_res = _build_results(self_b, ic_b, dirs["ti60qmx3_blob_recon"],
+                              dirs["hqt6bwmp_blob_recon"])
+    # Method order: k-Wave R1-5, IC R1, L2, L1 → short labels: 1..5, IC, L2, L1
+    short = ["1", "2", "3", "4", "5", "IC", "L2", "L1"]
+    short = short[:len(geom_res)]                 # trim if a rank missing
+    _draw_combined_metrics(
+        geom_res, blob_res,
+        save_path=_FIG_DIR / "5.2_retune_metrics.svg",
+        short_labels=short,
+    )
+    print("  [J4] done.")
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -743,66 +997,60 @@ def figure_J4() -> None:
 # ──────────────────────────────────────────────────────────────────────────────
 
 def figure_J5() -> None:
-    """5.3_blind_metrics_{geom,blob}.svg — box-plot only (no grid).
+    """5.3_blind_metrics.svg — combined GeomSet | BlobSet box-plot.
 
-    4 panels (MAE/RMSE/SSIM/CNR), 4 boxes:
-      standalone INR rank-1  |  measurement-regularised rank-1  |  L2  |  L1
+    4 panels (MAE/RMSE/SSIM/CNR); each panel split by a dashed line.
+    Methods (boxes per side): Standalone INR R1 | Meas. Reg. R1 | L2 | L1.
+    Short labels on x-axis: "Std", "MR", "L2", "L1".
     """
-    print("\n[J5] Building blind regularisation metrics figures ...")
-    p    = _get_p()
+    print("\n[J5] Building combined blind-regularisation metrics ...")
     dirs = _require_sources(
-        "ti60qmx3_geom_recon",    "ti60qmx3_geom_denoised",
-        "ti60qmx3_blob_recon",    "ti60qmx3_blob_denoised",
+        "ti60qmx3_geom_recon", "ti60qmx3_geom_denoised",
+        "ti60qmx3_blob_recon", "ti60qmx3_blob_denoised",
     )
 
-    for ds_tag, recon_key, dn_key in [
-        ("geom", "ti60qmx3_geom_recon",  "ti60qmx3_geom_denoised"),
-        ("blob", "ti60qmx3_blob_recon",   "ti60qmx3_blob_denoised"),
-    ]:
-        print(f"  [J5/{ds_tag}] loading ...")
+    def _build(recon_key, dn_key):
         recon_data = _load_npz(dirs[recon_key], recon_key)
         dn_data    = _load_npz(dirs[dn_key],    dn_key)
-
-        metrics_entries: list[tuple[str, list[dict]]] = []
-
-        # Standalone INR rank#1
+        entries: list[tuple[str, list[dict]]] = []
         try:
             lbl_std, _ = _pick_rank(recon_data["recons"], 1)
-            metrics_entries.append(
-                _build_results_entry("Standalone INR", recon_data, lbl_std, dirs[recon_key])
+            entries.append(
+                _build_results_entry("Standalone INR", recon_data, lbl_std,
+                                     dirs[recon_key])
             )
         except KeyError:
-            print(f"  [J5/{ds_tag}] standalone rank#1 not found")
-
-        # Measurement-regularised rank#1
+            pass
         try:
             lbl_dn, _ = _pick_rank(dn_data["recons"], 1)
-            metrics_entries.append(
-                _build_results_entry("Meas. Reg.", dn_data, lbl_dn, dirs[dn_key])
+            entries.append(
+                _build_results_entry("Meas. Reg.", dn_data, lbl_dn,
+                                     dirs[dn_key])
             )
         except KeyError:
-            print(f"  [J5/{ds_tag}] denoised rank#1 not found")
-
-        # Baselines (prefer standalone source; fall back to denoised)
+            pass
         for baseline in ("L2", "L1"):
             if baseline in recon_data["recons"]:
-                metrics_entries.append(
-                    _build_results_entry(baseline, recon_data, baseline, dirs[recon_key])
+                entries.append(
+                    _build_results_entry(baseline, recon_data, baseline,
+                                         dirs[recon_key])
                 )
             elif baseline in dn_data["recons"]:
-                metrics_entries.append(
-                    _build_results_entry(baseline, dn_data, baseline, dirs[dn_key])
+                entries.append(
+                    _build_results_entry(baseline, dn_data, baseline,
+                                         dirs[dn_key])
                 )
+        return dict(entries)
 
-        results_dict = dict(metrics_entries)
-        with matplotlib.rc_context(p.SERIF_RCPARAMS):
-            p.plot_metrics_comparison(
-                results=results_dict,
-                save_path=_FIG_DIR / f"5.3_blind_metrics_{ds_tag}.svg",
-                show=False,
-                png_fallback=True,
-            )
-        print(f"  [J5/{ds_tag}] done.")
+    geom_res = _build("ti60qmx3_geom_recon", "ti60qmx3_geom_denoised")
+    blob_res = _build("ti60qmx3_blob_recon", "ti60qmx3_blob_denoised")
+    _draw_combined_metrics(
+        geom_res, blob_res,
+        save_path=_FIG_DIR / "5.3_blind_metrics.svg",
+        short_labels=["Std", "MR", "L2", "L1"],
+        group_labels=("GeomSet", "BlobSet"),
+    )
+    print("  [J5] done.")
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -810,10 +1058,10 @@ def figure_J5() -> None:
 # ──────────────────────────────────────────────────────────────────────────────
 
 def figure_J5b() -> None:
-    """5.3_staged_grid.svg — 3 rows × 6 cols.
+    """5.3_staged_grid.svg — side-by-side GeomSet | BlobSet, one row dim.
 
-    Rows : GT  |  standalone INR (ti60qmx3 rank#1)  |  staged joint (z7bs7iy5 honest rank#1)
-    Cols : 3 geom samples + 3 blob samples (column headers show G-I/B-I etc.)
+    Rows: GT | Standalone | Staged Joint.  Cols: all geom samples + dashed
+    separator + all blob samples.  Single shared colorbar.
     """
     print("\n[J5b] Building staged joint grid figure ...")
     dirs = _require_sources(
@@ -826,56 +1074,43 @@ def figure_J5b() -> None:
     g_joint = _load_npz(dirs["z7bs7iy5_geom_honest"], "z7bs7iy5_geom_honest")
     b_joint = _load_npz(dirs["z7bs7iy5_blob_honest"], "z7bs7iy5_blob_honest")
 
-    n_geom = min(3, len(g_recon["gt"]))
-    n_blob = min(3, len(b_recon["gt"]))
-    g_c    = _col_indices(len(g_recon["gt"]), n_geom)
-    b_c    = _col_indices(len(b_recon["gt"]), n_blob)
-    gj_c   = _col_indices(len(g_joint["gt"]), n_geom)
-    bj_c   = _col_indices(len(b_joint["gt"]), n_blob)
-
-    gt_g_imgs = [_to_sos_img(g_recon["gt"][i]) for i in g_c]
-    gt_b_imgs = [_to_sos_img(b_recon["gt"][i]) for i in b_c]
-    gt_imgs   = gt_g_imgs + gt_b_imgs
-    norm      = _shared_norm(gt_imgs)
-
     try:
-        lbl_gr, arr_gr = _pick_rank(g_recon["recons"], 1)
-        lbl_br, arr_br = _pick_rank(b_recon["recons"], 1)
+        _, arr_gr = _pick_rank(g_recon["recons"], 1)
+        _, arr_br = _pick_rank(b_recon["recons"], 1)
+        _, arr_gj = _pick_rank(g_joint["recons"], 1)
+        _, arr_bj = _pick_rank(b_joint["recons"], 1)
     except KeyError as exc:
-        print(f"  [J5b] standalone rank#1 missing: {exc}")
+        print(f"  [J5b] rank#1 missing: {exc}")
         return
 
-    try:
-        lbl_gj, arr_gj = _pick_rank(g_joint["recons"], 1)
-        lbl_bj, arr_bj = _pick_rank(b_joint["recons"], 1)
-    except KeyError as exc:
-        print(f"  [J5b] joint rank#1 missing: {exc}")
-        return
+    def _panel(title, data_gt, arr_std, arr_jt):
+        n = len(data_gt["gt"])
+        gt_imgs = [_to_sos_img(data_gt["gt"][i]) for i in range(n)]
+        def _baseline_row(key):
+            if key in data_gt["recons"]:
+                arr = data_gt["recons"][key]
+                return [_to_sos_img(arr[i]) for i in range(n)]
+            return [np.full_like(gt_imgs[0], np.nan) for _ in gt_imgs]
+        return (
+            title,
+            _col_headers(n),
+            [
+                gt_imgs,
+                [_to_sos_img(arr_std[i]) for i in range(n)],
+                [_to_sos_img(arr_jt[i])  for i in range(n)],
+                _baseline_row("L2"),
+                _baseline_row("L1"),
+            ],
+        )
 
-    row_standalone = (
-        [_to_sos_img(arr_gr[i]) for i in g_c]
-        + [_to_sos_img(arr_br[i]) for i in b_c]
-    )
-    row_joint = (
-        [_to_sos_img(arr_gj[i]) for i in gj_c]
-        + [_to_sos_img(arr_bj[i]) for i in bj_c]
-    )
-
-    col_labels = (
-        [f"G-{_ROMAN[i]}" for i in range(n_geom)]
-        + [f"B-{_ROMAN[i]}" for i in range(n_blob)]
-    )
-
-    _draw_recon_grid(
-        [
-            ("GT",            gt_imgs),
-            ("Standalone",    row_standalone),
-            ("Staged\nJoint", row_joint),
-        ],
-        col_labels,
+    panels = [
+        _panel("GeomSet", g_recon, arr_gr, arr_gj),
+        _panel("BlobSet", b_recon, arr_br, arr_bj),
+    ]
+    _draw_combined_dataset_grid(
+        panels,
+        row_labels=["GT", "Standalone", "Staged\nJoint", "L2", "L1"],
         save_path=_FIG_DIR / "5.3_staged_grid.svg",
-        shared_norm=norm,
-        gt_images=gt_imgs,
     )
     print("  [J5b] done.")
 
@@ -920,63 +1155,77 @@ def figure_J6() -> None:
     std_b  = _load_npz(dirs["ti60qmx3_blob_recon"],  "ti60qmx3_blob_recon")
 
     # ── Build grid ────────────────────────────────────────────────────────
-    # Use the CNR-selected ydma npz as the GT source (same dataset, any run will do)
-    n_g = 3
-    n_b = 3
-    g_c = _col_indices(len(ydma_cnr_g["gt"]), n_g)
-    b_c = _col_indices(len(ydma_cnr_b["gt"]), n_b)
+    # New layout (peer-review F6): two stacked panels (GeomSet, BlobSet), each
+    # with 3 rows (GT, flat-winner ydma mean-MAE rank-1, inclusion-aware
+    # z7bs7iy5 rank-1) over all dataset samples. Drops the 5-row objective
+    # comparison from the grid — the scatter carries that.
+    def _pick(d, prefixes):
+        m = _first_match_by_prefixes(d["recons"], prefixes)
+        if m is None:
+            raise KeyError(f"no match for prefixes {prefixes}")
+        return m[1]
 
-    gt_g_imgs = [_to_sos_img(ydma_cnr_g["gt"][i]) for i in g_c]
-    gt_b_imgs = [_to_sos_img(ydma_cnr_b["gt"][i]) for i in b_c]
-    gt_imgs   = gt_g_imgs + gt_b_imgs
-    norm      = _shared_norm(gt_imgs)
+    try:
+        arr_g_flat = _pick(ydma_mae_g, ["rank"])
+        arr_b_flat = _pick(ydma_mae_b, ["rank"])
+        arr_g_inc  = _pick(z7bs_g,     ["cnr", "rank"])
+        arr_b_inc  = _pick(z7bs_b,     ["cnr", "rank"])
+    except KeyError as exc:
+        print(f"  [J6/grid] required row missing: {exc}")
+        arr_g_flat = arr_b_flat = arr_g_inc = arr_b_inc = None
 
-    col_labels = (
-        [f"G-{_ROMAN[i]}" for i in range(n_g)]
-        + [f"B-{_ROMAN[i]}" for i in range(n_b)]
-    )
+    if arr_g_flat is not None:
+        def _panel(title, data_gt, arr_flat, arr_inc, baseline_source):
+            n = len(data_gt["gt"])
+            gt_imgs = [_to_sos_img(data_gt["gt"][i]) for i in range(n)]
+            def _baseline_row(key):
+                if key in baseline_source["recons"]:
+                    arr = baseline_source["recons"][key]
+                    m = min(n, len(arr))
+                    row = [_to_sos_img(arr[i]) for i in range(m)]
+                    while len(row) < n:
+                        row.append(np.full_like(gt_imgs[0], np.nan))
+                    return row
+                return [np.full_like(gt_imgs[0], np.nan) for _ in gt_imgs]
+            return (
+                title,
+                _col_headers(n),
+                [
+                    gt_imgs,
+                    [_to_sos_img(arr_flat[i]) for i in range(n)],
+                    [_to_sos_img(arr_inc[i])  for i in range(n)],
+                    _baseline_row("L2"),
+                    _baseline_row("L1"),
+                ],
+            )
 
-    # Row definitions: (display, geom_npz, blob_npz, geom_prefixes, blob_prefixes)
-    # ydma MAE-R1: separate mean-MAE-selected run dirs; labels rank1_..., rank2_...
-    # ydma CNR-R1: CNR-selected run dirs; labels cnr1_..., cnr2_...
-    # q2p4/edj3/z7bs: replayed with --selection_metric cnr; labels cnr1_...
+        panels = [
+            _panel("GeomSet", ydma_mae_g, arr_g_flat, arr_g_inc, std_g),
+            _panel("BlobSet", ydma_mae_b, arr_b_flat, arr_b_inc, std_b),
+        ]
+        _draw_combined_dataset_grid(
+            panels,
+            row_labels=["GT", "Flat\nwinner", "Inclusion\naware", "L2", "L1"],
+            save_path=_FIG_DIR / "5.3_ranking_grid.svg",
+        )
+
+    # The scatter still consumes all 5 objectives × 2 datasets; build a small
+    # spec list to feed it.
     row_defs = [
-        ("ydma\nMAE-R1", ydma_mae_g, ydma_mae_b, ["rank"],        ["rank"]),
-        ("ydma\nCNR-R1", ydma_cnr_g, ydma_cnr_b, ["cnr"],         ["cnr"]),
-        ("q2p4 R1",      q2p4_g,     q2p4_b,     ["cnr", "rank"], ["cnr", "rank"]),
-        ("edj3 R1",      edj3_g,     edj3_b,     ["cnr", "rank"], ["cnr", "rank"]),
-        ("z7bs R1",      z7bs_g,     z7bs_b,     ["cnr", "rank"], ["cnr", "rank"]),
+        ("ydma MAE-R1", ydma_mae_g, ydma_mae_b, ["rank"],        ["rank"]),
+        ("ydma CNR-R1", ydma_cnr_g, ydma_cnr_b, ["cnr"],         ["cnr"]),
+        ("q2p4 R1",     q2p4_g,     q2p4_b,     ["cnr", "rank"], ["cnr", "rank"]),
+        ("edj3 R1",     edj3_g,     edj3_b,     ["cnr", "rank"], ["cnr", "rank"]),
+        ("z7bs R1",     z7bs_g,     z7bs_b,     ["cnr", "rank"], ["cnr", "rank"]),
     ]
-
-    row_specs: list[tuple[str, list[np.ndarray]]] = [("GT", gt_imgs)]
-
-    # Store (display_label, arr_g, arr_b, gd, bd) for scatter re-use
     scatter_rows: list[tuple[str, np.ndarray, np.ndarray, dict, dict]] = []
-
     for row_label, gd, bd, gp, bp in row_defs:
         g_match = _first_match_by_prefixes(gd["recons"], gp)
         b_match = _first_match_by_prefixes(bd["recons"], bp)
         if g_match is None or b_match is None:
-            print(f"  [J6] missing data for row '{row_label}' — skipping")
+            print(f"  [J6/scatter] missing data for '{row_label}' — skipping")
             continue
-        lbl_g, arr_g = g_match
-        lbl_b, arr_b = b_match
-
-        gc_local = _col_indices(len(gd["gt"]), n_g)
-        bc_local = _col_indices(len(bd["gt"]), n_b)
-        imgs = (
-            [_to_sos_img(arr_g[i]) for i in gc_local]
-            + [_to_sos_img(arr_b[i]) for i in bc_local]
-        )
-        row_specs.append((row_label, imgs))
-        scatter_rows.append((row_label, arr_g, arr_b, gd, bd))
-
-    _draw_recon_grid(
-        row_specs, col_labels,
-        save_path=_FIG_DIR / "5.3_ranking_grid.svg",
-        shared_norm=norm,
-        gt_images=gt_imgs,
-    )
+        scatter_rows.append((row_label, g_match[1], b_match[1], gd, bd))
 
     # ── Scatter: mean MAE vs mean CNR ─────────────────────────────────────
     def _mean_mae_cnr(npz_data: dict, arr: np.ndarray) -> tuple[float, float]:
@@ -1028,77 +1277,151 @@ def figure_J6() -> None:
             "CNR": cnr_r,
         })
 
-    palette = p.WONG[1:]  # skip black
+    # Short-code mapping: sweep → caption-friendly label, marker style.
+    # Color carries the DATASET (blue=geom, orange=blob); marker shape is a
+    # secondary cue (o=geom, ^=blob) except the flat-winner which uses ★.
+    SHORT = {
+        "ydma MAE-R1": "flat-winner",  # mean-MAE-selected replay of mean-MAE sweep
+        "ydma CNR-R1": "mean-err",     # CNR-selected replay of mean-MAE sweep
+        "q2p4 R1":     "ROI-comp",
+        "edj3 R1":     "pure-ROI",
+        "z7bs R1":     "full-IA",
+    }
+    DS_COLOR  = {"geom": "#1f77b4", "blob": "#d95f02"}
+    DS_MARKER = {"geom": "o",        "blob": "^"}
+    FLAT_MARKER = "*"   # used for ydma MAE-R1 in both datasets
+
+    def _marker_for(sp):
+        return FLAT_MARKER if sp["label"] == "ydma MAE-R1" else DS_MARKER[sp["dataset"]]
+
+    def _short_for(lbl):
+        return SHORT.get(lbl, lbl)
 
     with matplotlib.rc_context(p.SERIF_RCPARAMS):
-        fig, ax = plt.subplots(figsize=(4.5, 3.5))
+        fig, ax = plt.subplots(figsize=(7.5, 5.0))
         fig.patch.set_facecolor("white")
 
-        # Faded reference points
+        # Reference points: faded grey, small markers.
         for rp in ref_pts:
-            marker = "o" if rp["dataset"] == "geom" else "s"
+            marker = DS_MARKER[rp["dataset"]]
             ax.scatter(
                 rp["MAE"], rp["CNR"],
-                marker=marker, s=28, alpha=0.25,
-                color="grey", linewidths=0.4, edgecolors="grey", zorder=2,
+                marker=marker, s=38, alpha=0.45,
+                color="lightgrey", linewidths=0.6,
+                edgecolors="dimgrey", zorder=2,
             )
             ax.annotate(
                 rp["label"], xy=(rp["MAE"], rp["CNR"]),
-                fontsize=4.5, color="grey", alpha=0.45,
-                xytext=(2, 2), textcoords="offset points",
+                fontsize=7, color="dimgrey",
+                xytext=(5, 5), textcoords="offset points",
             )
 
-        # Method points
-        seen_labels: dict[str, int] = {}
+        # Build geom↔blob pair index for connectors + per-method midpoint labels.
+        by_method: dict[str, dict[str, tuple[float, float]]] = {}
         for sp in scatter_pts:
-            lbl = sp["label"]
-            if lbl not in seen_labels:
-                seen_labels[lbl] = len(seen_labels)
-            color = palette[seen_labels[lbl] % len(palette)]
-            marker = "o" if sp["dataset"] == "geom" else "s"
+            by_method.setdefault(sp["label"], {})[sp["dataset"]] = (sp["MAE"], sp["CNR"])
+
+        # Faint NEUTRAL connector linking each method's geom↔blob pair.
+        for lbl, pts in by_method.items():
+            if "geom" in pts and "blob" in pts:
+                gx, gy = pts["geom"]
+                bx, by = pts["blob"]
+                ax.plot([gx, bx], [gy, by],
+                        color="#666666", alpha=0.30, linewidth=0.7,
+                        linestyle=(0, (3, 2)), zorder=2)
+
+        # Method points — DOT-sized markers coloured by dataset; star for the
+        # flat-winner. Color + shape carry the dataset; labels stay short.
+        for sp in scatter_pts:
+            marker = _marker_for(sp)
+            color  = DS_COLOR[sp["dataset"]]
+            size   = 140 if marker == FLAT_MARKER else 55
             ax.scatter(
                 sp["MAE"], sp["CNR"],
-                marker=marker, s=55, alpha=0.85,
-                color=color, linewidths=0.6, edgecolors="black", zorder=3,
-            )
-            ax.annotate(
-                f"{lbl} ({sp['dataset']})",
-                xy=(sp["MAE"], sp["CNR"]),
-                fontsize=4.5,
-                xytext=(4, 3), textcoords="offset points",
+                marker=marker, s=size, alpha=0.95,
+                color=color, linewidths=0.7, edgecolors="black", zorder=4,
             )
 
-        # Legend: shapes for dataset, colours for method
-        from matplotlib.lines import Line2D
-        from matplotlib.patches import Patch
-        shape_handles = [
-            Line2D([0], [0], marker="o", color="grey", linestyle="None",
-                   markersize=5, label="GeomSet"),
-            Line2D([0], [0], marker="s", color="grey", linestyle="None",
-                   markersize=5, label="BlobSet"),
-        ]
-        color_handles = [
-            Patch(
-                facecolor=palette[idx % len(palette)], alpha=0.8,
-                edgecolor="black", linewidth=0.4, label=lbl,
+        # ONE label per method placed at the midpoint of its geom↔blob pair,
+        # with a clear leader line. Per-method radial offsets (data coords)
+        # spread the labels around the cluster so they don't overlap.
+        # Approximate cluster spans: geom MAE ≈3.5, blob MAE ≈6.0; midpoint ≈4.7.
+        LABEL_OFFSETS = {
+            "flat-winner": (-1.10, +0.50),   # upper-left
+            "mean-err":    (+0.90, -0.50),   # lower-right
+            "ROI-comp":    (-1.20, -0.50),   # lower-left
+            "pure-ROI":    (+0.90, +0.50),   # upper-right
+            "full-IA":     (+0.10, +0.90),   # straight up
+        }
+        for lbl, pts in by_method.items():
+            short = _short_for(lbl)
+            if "geom" in pts and "blob" in pts:
+                gx, gy = pts["geom"]
+                bx, by = pts["blob"]
+                mx, my = (gx + bx) / 2.0, (gy + by) / 2.0
+            elif "geom" in pts:
+                mx, my = pts["geom"]
+            else:
+                mx, my = pts["blob"]
+            dx, dy = LABEL_OFFSETS.get(short, (0.6, 0.4))
+            ax.annotate(
+                short,
+                xy=(mx, my),
+                xytext=(mx + dx, my + dy),
+                textcoords="data",
+                fontsize=9, fontweight="bold",
+                ha="center", va="center",
+                color="black",
+                bbox=dict(boxstyle="round,pad=0.18", fc="white",
+                          ec="black", lw=0.4, alpha=0.85),
+                arrowprops=dict(arrowstyle="-", linewidth=0.5,
+                                color="black", alpha=0.55,
+                                shrinkA=2, shrinkB=2),
+                zorder=6,
             )
-            for lbl, idx in seen_labels.items()
+
+        # Reference gridlines (MAE=4, 6; CNR=1, 2).
+        for x_ref in (4.0, 6.0):
+            ax.axvline(x_ref, color="#cccccc", linewidth=0.7,
+                       linestyle=":", alpha=0.7, zorder=1)
+        for y_ref in (1.0, 2.0):
+            ax.axhline(y_ref, color="#cccccc", linewidth=0.7,
+                       linestyle=":", alpha=0.7, zorder=1)
+
+        # Legend OUTSIDE the plot.
+        from matplotlib.lines import Line2D
+        legend_handles = [
+            Line2D([0], [0], marker="o", color=DS_COLOR["geom"], linestyle="None",
+                   markersize=9, markeredgecolor="black", label="GeomSet"),
+            Line2D([0], [0], marker="^", color=DS_COLOR["blob"], linestyle="None",
+                   markersize=9, markeredgecolor="black", label="BlobSet"),
+            Line2D([0], [0], marker=FLAT_MARKER, color="grey", linestyle="None",
+                   markersize=11, markeredgecolor="black",
+                   label="flat-winner (mean-MAE\nreplay of mean-err sweep)"),
+            Line2D([0], [0], marker="s", color="lightgrey", linestyle="None",
+                   markersize=8, markeredgecolor="dimgrey",
+                   label="reference (L1/L2/standalone)"),
         ]
         ax.legend(
-            handles=shape_handles + color_handles,
-            fontsize=6, frameon=True, framealpha=0.9,
-            edgecolor="lightgrey", loc="best",
-            handlelength=1.0, handletextpad=0.4, columnspacing=0.8,
+            handles=legend_handles,
+            fontsize=8, frameon=False,
+            loc="upper left", bbox_to_anchor=(1.02, 1.0),
+            borderaxespad=0.0,
+            handlelength=1.2, handletextpad=0.5,
+            labelspacing=1.0,
         )
 
-        ax.set_xlabel("Mean MAE (m/s)", fontsize=9)
-        ax.set_ylabel("Mean CNR", fontsize=9)
-        ax.set_title("MAE vs CNR — ranking strategy comparison", fontsize=9, pad=4)
+        ax.set_xlabel("Mean MAE (m/s)", fontsize=10)
+        ax.set_ylabel("Mean CNR", fontsize=10)
+        ax.set_title("MAE vs CNR — ranking strategy comparison",
+                     fontsize=10, pad=6)
         ax.spines["top"].set_visible(False)
         ax.spines["right"].set_visible(False)
-        ax.tick_params(labelsize=7, direction="in")
+        ax.tick_params(labelsize=9, direction="in")
+        fig.subplots_adjust(right=0.70, left=0.10,
+                            top=0.93, bottom=0.10)
 
-        p.save(fig, _FIG_DIR / "5.3_mae_cnr_scatter.svg", png_fallback=True)
+        p.save(fig, _FIG_DIR / "5.3_mae_cnr_scatter.svg", png_fallback=False)
         plt.close(fig)
 
     print("  [J6] done.")
@@ -1109,33 +1432,24 @@ def figure_J6() -> None:
 # ──────────────────────────────────────────────────────────────────────────────
 
 def figure_J7() -> None:
-    """5.4_phantom_grid.svg (6 rows × 4 cols) + 5.4_breast_grid.svg (6 rows × 2 cols).
+    """5.4_realdata_grid.svg — single side-by-side PhantomSet | BreastSet figure.
 
-    Rows : GT  |  standalone INR  |  meas-reg  |  staged joint  |  L2  |  L1
+    Rows : GT | Standalone | Meas. Reg. | Staged Joint | L2 | L1
+    Cols : 4 phantom samples | dashed sep | 2 breast samples
+    Shared colorbar; phantom/breast may have placeholder GT (handled).
     """
-    print("\n[J7] Building phantom / breast figures ...")
+    print("\n[J7] Building combined real-data grid figure ...")
     dirs = _require_sources(
         "ti60qmx3_phantom_recon",    "ti60qmx3_breast_recon",
         "z7bs7iy5_phantom_honest",   "z7bs7iy5_breast_honest",
         "ti60qmx3_phantom_denoised", "ti60qmx3_breast_denoised",
     )
 
-    for ds_tag, n_target_cols, src in [
-        ("phantom", 4, {
-            "recon":    "ti60qmx3_phantom_recon",
-            "denoised": "ti60qmx3_phantom_denoised",
-            "joint":    "z7bs7iy5_phantom_honest",
-        }),
-        ("breast", 2, {
-            "recon":    "ti60qmx3_breast_recon",
-            "denoised": "ti60qmx3_breast_denoised",
-            "joint":    "z7bs7iy5_breast_honest",
-        }),
-    ]:
-        print(f"  [J7/{ds_tag}] loading ...")
-        recon_data = _load_npz(dirs[src["recon"]],    src["recon"])
-        dn_data    = _load_npz(dirs[src["denoised"]], src["denoised"])
-        jt_data    = _load_npz(dirs[src["joint"]],    src["joint"])
+    # Per-dataset row builder — produces (title, col_labels, rows_imgs).
+    def _build_panel(title, n_target_cols, recon_key, dn_key, jt_key):
+        recon_data = _load_npz(dirs[recon_key], recon_key)
+        dn_data    = _load_npz(dirs[dn_key],    dn_key)
+        jt_data    = _load_npz(dirs[jt_key],    jt_key)
 
         n_samples = len(recon_data["gt"])
         n_cols    = min(n_target_cols, n_samples)
@@ -1144,72 +1458,190 @@ def figure_J7() -> None:
         jt_c_idx  = _col_indices(len(jt_data["gt"]), n_cols)
 
         gt_imgs = [_to_sos_img(recon_data["gt"][i]) for i in c_idx]
-
-        # Detect absent GT (all-zero array written as placeholder)
         has_gt = not np.all(recon_data["gt"] == 0.0)
         if not has_gt:
-            print(
-                f"  [J7/{ds_tag}] WARNING: GT appears absent (all-zero array). "
-                "GT row will show blank — verify source."
-            )
+            print(f"  [J7/{title}] WARNING: GT absent (placeholder zeros).")
 
-        if has_gt:
-            norm = _shared_norm(gt_imgs)
-        else:
-            norm = mcolors.Normalize(vmin=1400.0, vmax=1600.0)
+        # Build each row.
+        def _row_or_blank(arr, idx_list):
+            return [_to_sos_img(arr[i]) for i in idx_list]
 
-        row_specs: list[tuple[str, list[np.ndarray]]] = [("GT", gt_imgs)]
-
-        # Standalone INR rank#1
         try:
-            lbl_r, arr_r = _pick_rank(recon_data["recons"], 1)
-            row_specs.append(
-                ("Standalone", [_to_sos_img(arr_r[i]) for i in c_idx])
-            )
+            _, arr_r = _pick_rank(recon_data["recons"], 1)
+            row_std = _row_or_blank(arr_r, c_idx)
         except KeyError:
-            print(f"  [J7/{ds_tag}] standalone rank#1 not found")
-
-        # Measurement-regularised rank#1
+            row_std = [np.full_like(gt_imgs[0], np.nan) for _ in gt_imgs]
         try:
-            lbl_dn, arr_dn = _pick_rank(dn_data["recons"], 1)
-            row_specs.append(
-                ("Meas. Reg.", [_to_sos_img(arr_dn[i]) for i in dn_c_idx])
-            )
+            _, arr_dn = _pick_rank(dn_data["recons"], 1)
+            row_dn = _row_or_blank(arr_dn, dn_c_idx)
         except KeyError:
-            print(f"  [J7/{ds_tag}] denoised rank#1 not found")
-
-        # Staged joint rank#1
+            row_dn = [np.full_like(gt_imgs[0], np.nan) for _ in gt_imgs]
         try:
-            lbl_jt, arr_jt = _pick_rank(jt_data["recons"], 1)
-            row_specs.append(
-                ("Staged\nJoint", [_to_sos_img(arr_jt[i]) for i in jt_c_idx])
-            )
+            _, arr_jt = _pick_rank(jt_data["recons"], 1)
+            row_jt = _row_or_blank(arr_jt, jt_c_idx)
         except KeyError:
-            print(f"  [J7/{ds_tag}] joint rank#1 not found")
+            row_jt = [np.full_like(gt_imgs[0], np.nan) for _ in gt_imgs]
+        row_L2 = (_row_or_blank(recon_data["recons"]["L2"], c_idx)
+                  if "L2" in recon_data["recons"]
+                  else [np.full_like(gt_imgs[0], np.nan) for _ in gt_imgs])
+        row_L1 = (_row_or_blank(recon_data["recons"]["L1"], c_idx)
+                  if "L1" in recon_data["recons"]
+                  else [np.full_like(gt_imgs[0], np.nan) for _ in gt_imgs])
 
-        # Baselines
+        return (title, _col_headers(n_cols),
+                [gt_imgs, row_std, row_dn, row_jt, row_L2, row_L1],
+                has_gt)
+
+    p_title, p_cols, p_rows, p_has_gt = _build_panel(
+        "PhantomSet", 4,
+        "ti60qmx3_phantom_recon", "ti60qmx3_phantom_denoised",
+        "z7bs7iy5_phantom_honest",
+    )
+    b_title, b_cols, b_rows, b_has_gt = _build_panel(
+        "BreastSet", 2,
+        "ti60qmx3_breast_recon", "ti60qmx3_breast_denoised",
+        "z7bs7iy5_breast_honest",
+    )
+
+    panels = [(p_title, p_cols, p_rows), (b_title, b_cols, b_rows)]
+    _draw_combined_dataset_grid(
+        panels,
+        row_labels=["GT", "Standalone", "Meas.\nReg.",
+                    "Staged\nJoint", "L2", "L1"],
+        save_path=_FIG_DIR / "5.4_realdata_grid.svg",
+        annotate_mae_cnr=(p_has_gt and b_has_gt),
+    )
+
+    # ── Combined metrics box plot — PhantomSet | BreastSet ─────────────────
+    def _build_metrics(recon_key, dn_key, jt_key):
+        recon_data = _load_npz(dirs[recon_key], recon_key)
+        dn_data    = _load_npz(dirs[dn_key],    dn_key)
+        jt_data    = _load_npz(dirs[jt_key],    jt_key)
+        entries: list[tuple[str, list[dict]]] = []
+        try:
+            lbl_std, _ = _pick_rank(recon_data["recons"], 1)
+            entries.append(_build_results_entry("Standalone INR", recon_data,
+                                                lbl_std, dirs[recon_key]))
+        except KeyError:
+            pass
+        try:
+            lbl_dn, _ = _pick_rank(dn_data["recons"], 1)
+            entries.append(_build_results_entry("Meas. Reg.", dn_data,
+                                                lbl_dn, dirs[dn_key]))
+        except KeyError:
+            pass
+        try:
+            lbl_jt, _ = _pick_rank(jt_data["recons"], 1)
+            entries.append(_build_results_entry("Staged Joint", jt_data,
+                                                lbl_jt, dirs[jt_key]))
+        except KeyError:
+            pass
         for baseline in ("L2", "L1"):
             if baseline in recon_data["recons"]:
-                arr = recon_data["recons"][baseline]
-                row_specs.append(
-                    (baseline, [_to_sos_img(arr[i]) for i in c_idx])
-                )
+                entries.append(_build_results_entry(baseline, recon_data,
+                                                    baseline, dirs[recon_key]))
+        return dict(entries)
 
-        _draw_recon_grid(
-            row_specs, _col_headers(n_cols),
-            save_path=_FIG_DIR / f"5.4_{ds_tag}_grid.svg",
-            shared_norm=norm,
-            gt_images=gt_imgs if has_gt else None,
-            annotate_mae_cnr=has_gt,
-        )
-        print(f"  [J7/{ds_tag}] done.")
+    phantom_res = _build_metrics("ti60qmx3_phantom_recon",
+                                 "ti60qmx3_phantom_denoised",
+                                 "z7bs7iy5_phantom_honest")
+    breast_res  = _build_metrics("ti60qmx3_breast_recon",
+                                 "ti60qmx3_breast_denoised",
+                                 "z7bs7iy5_breast_honest")
+    _draw_combined_metrics(
+        phantom_res, breast_res,
+        save_path=_FIG_DIR / "5.4_realdata_metrics.svg",
+        short_labels=["Std", "MR", "SJ", "L2", "L1"],
+        group_labels=("PhantomSet", "BreastSet"),
+    )
+    print("  [J7] done.")
 
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Dispatch
 # ──────────────────────────────────────────────────────────────────────────────
 
+def figure_5_1_grid() -> None:
+    """5.1_grid.svg — combined IC | Oracle reconstruction grid on IC data.
+
+    Rows : GT | R1 | R2 | R3 | L2 | L1  (same on both panels; L1/L2 share)
+    Left  panel header : "IC"      (self-supervised, uses L)
+    Right panel header : "Oracle"  (direct supervision, no L)
+    Single shared diverging colormap + colorbar.
+    """
+    print("\n[F5.1/grid] Building combined IC | Oracle grid ...")
+    dirs = _require_sources("hqt6bwmp_ic_self", "hqt6bwmp_ic_oracle")
+    self_data   = _load_npz(dirs["hqt6bwmp_ic_self"],   "hqt6bwmp_ic_self")
+    oracle_data = _load_npz(dirs["hqt6bwmp_ic_oracle"], "hqt6bwmp_ic_oracle")
+
+    def _panel(title, data):
+        n = len(data["gt"])
+        col_labels = _col_headers(n)
+        gt_imgs = [_to_sos_img(data["gt"][i]) for i in range(n)]
+        rows_imgs = [gt_imgs]
+        for r in range(1, 4):
+            try:
+                _, arr = _pick_rank(data["recons"], r)
+                rows_imgs.append([_to_sos_img(arr[i]) for i in range(n)])
+            except KeyError:
+                rows_imgs.append([np.full_like(gt_imgs[0], np.nan)
+                                  for _ in gt_imgs])
+        for baseline in ("L2", "L1"):
+            if baseline in data["recons"]:
+                arr = data["recons"][baseline]
+                rows_imgs.append([_to_sos_img(arr[i]) for i in range(n)])
+            else:
+                rows_imgs.append([np.full_like(gt_imgs[0], np.nan)
+                                  for _ in gt_imgs])
+        return (title, col_labels, rows_imgs)
+
+    panels = [
+        _panel("IC",     self_data),
+        _panel("Oracle", oracle_data),
+    ]
+    _draw_combined_dataset_grid(
+        panels,
+        row_labels=["GT", "1", "2", "3", "L2", "L1"],
+        save_path=_FIG_DIR / "5.1_grid.svg",
+    )
+    print("  [F5.1/grid] done.")
+
+
+def figure_5_1_metrics() -> None:
+    """5.1_metrics.svg — combined IC | Oracle metrics box plots."""
+    print("\n[F5.1/metrics] Building combined IC | Oracle metrics ...")
+    dirs = _require_sources("hqt6bwmp_ic_self", "hqt6bwmp_ic_oracle")
+    self_data   = _load_npz(dirs["hqt6bwmp_ic_self"],   "hqt6bwmp_ic_self")
+    oracle_data = _load_npz(dirs["hqt6bwmp_ic_oracle"], "hqt6bwmp_ic_oracle")
+
+    def _build(data, run_dir):
+        entries: list[tuple[str, list[dict]]] = []
+        for r in range(1, 4):
+            try:
+                lbl, _ = _pick_rank(data["recons"], r)
+                entries.append(_build_results_entry(f"R{r}", data, lbl, run_dir))
+            except KeyError:
+                pass
+        for baseline in ("L2", "L1"):
+            if baseline in data["recons"]:
+                entries.append(
+                    _build_results_entry(baseline, data, baseline, run_dir)
+                )
+        return dict(entries)
+
+    ic_res     = _build(self_data,   dirs["hqt6bwmp_ic_self"])
+    oracle_res = _build(oracle_data, dirs["hqt6bwmp_ic_oracle"])
+    _draw_combined_metrics(
+        ic_res, oracle_res,
+        save_path=_FIG_DIR / "5.1_metrics.svg",
+        group_labels=("IC", "Oracle"),
+    )
+    print("  [F5.1/metrics] done.")
+
+
 _FIGURE_MAP: dict[str, Any] = {
+    "F5.1g": figure_5_1_grid,
+    "F5.1m": figure_5_1_metrics,
     "J3":  figure_J3,
     "J4":  figure_J4,
     "J5":  figure_J5,

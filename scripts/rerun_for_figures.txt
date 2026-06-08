@@ -1,0 +1,64 @@
+# ============================================================================
+# Re-run commands — regenerate figure-source runs WITH recons.npz
+# ----------------------------------------------------------------------------
+# Why: results.json is metrics-only. The ch5 figure builder (J3-J7) needs the
+# per-sample reconstructed SoS arrays. The pipelines now write recons.npz next
+# to results.json; these runs re-produce the figure sources WITH that artifact.
+#
+# Run from scripts/ with the venv active:
+#   source ../.venv/bin/activate
+# Each run also writes results.json — the writer re-pulls numbers from the NEW
+# run dirs so figure and table always come from the same run.
+#
+# Eval indices (locked):
+#   geom: 23 11 5 22 28 9 14 7
+#   blob: 34 18 19 11 23 2 7 69
+#   phantom / breast_data: all samples (no --indices)
+# ============================================================================
+
+
+# ── SECTION 1 — Joint honest replays (J1) ──────────────────────────────────
+# 12 cnr-selected honest runs + 2 ydma0yxl mean-MAE-selected (negative example).
+# Pane 1 — ydma0yxl
+uv run python run_joint_denoiser_recon.py --dataset kwave_geom --sweep_id ydma0yxl --top_k 5 --indices 23 11 5 22 28 9 14 7 --selection_metric cnr  --stage3c_checkpoint honest --report_plots --tag honest -> done
+uv run python run_joint_denoiser_recon.py --dataset kwave_blob --sweep_id ydma0yxl --top_k 5 --indices 34 18 19 11 23 2 7 69 --selection_metric cnr  --stage3c_checkpoint honest --report_plots --tag honest -> done
+uv run python run_joint_denoiser_recon.py --dataset kwave_geom --sweep_id ydma0yxl --top_k 5 --indices 23 11 5 22 28 9 14 7 --selection_metric loss --stage3c_checkpoint honest --report_plots --tag honest_meanmae -> done 
+uv run python run_joint_denoiser_recon.py --dataset kwave_blob --sweep_id ydma0yxl --top_k 5 --indices 34 18 19 11 23 2 7 69 --selection_metric loss --stage3c_checkpoint honest --report_plots --tag honest_meanmae -> done
+# job finished
+
+# Pane 2 — q2p4zv3e
+uv run python run_joint_denoiser_recon.py --dataset kwave_geom --sweep_id q2p4zv3e --top_k 5 --indices 23 11 5 22 28 9 14 7 --selection_metric cnr --stage3c_checkpoint honest --report_plots --tag honest  -> done
+uv run python run_joint_denoiser_recon.py --dataset kwave_blob --sweep_id q2p4zv3e --top_k 5 --indices 34 18 19 11 23 2 7 69 --selection_metric cnr --stage3c_checkpoint honest --report_plots --tag honest -> done
+# finished
+
+# Pane 3 — edj3mqou
+uv run python run_joint_denoiser_recon.py --dataset kwave_geom --sweep_id edj3mqou --top_k 5 --indices 23 11 5 22 28 9 14 7 --selection_metric cnr --stage3c_checkpoint honest --report_plots --tag honest  -> done
+uv run python run_joint_denoiser_recon.py --dataset kwave_blob --sweep_id edj3mqou --top_k 5 --indices 34 18 19 11 23 2 7 69 --selection_metric cnr --stage3c_checkpoint honest --report_plots --tag honest -> done
+uv run python run_joint_denoiser_recon.py --dataset phantom     --sweep_id edj3mqou --top_k 5 --selection_metric cnr --stage3c_checkpoint honest --report_plots --tag honest -> done
+uv run python run_joint_denoiser_recon.py --dataset breast_data --sweep_id edj3mqou --top_k 5 --selection_metric cnr --stage3c_checkpoint honest --report_plots --tag honest -> done
+
+# Pane 4 — z7bs7iy5
+uv run python run_joint_denoiser_recon.py --dataset kwave_geom --sweep_id z7bs7iy5 --top_k 5 --indices 23 11 5 22 28 9 14 7 --selection_metric cnr --stage3c_checkpoint honest --report_plots --tag honest -> null
+uv run python run_joint_denoiser_recon.py --dataset kwave_blob --sweep_id z7bs7iy5 --top_k 5 --indices 34 18 19 11 23 2 7 69 --selection_metric cnr --stage3c_checkpoint honest --report_plots --tag honest -> null
+uv run python run_joint_denoiser_recon.py --dataset phantom     --sweep_id z7bs7iy5 --top_k 5 --selection_metric cnr --stage3c_checkpoint honest --report_plots --tag honest -> done 
+uv run python run_joint_denoiser_recon.py --dataset breast_data --sweep_id z7bs7iy5 --top_k 5 --selection_metric cnr --stage3c_checkpoint honest --report_plots --tag honest -> done
+#finished
+
+# ── SECTION 2 — Plain-INR reconstruction sources (J3/J4/J5/J7) ──────────────
+# hqt6bwmp (IC-tuned) + ti60qmx3 (k-Wave-tuned). --top_k 5, locked index sets.
+uv run python run_reconstruction.py --sweep_id hqt6bwmp --dataset kwave_geom --top_k 5 --indices 23 11 5 22 28 9 14 7 --report_plots --tag npz -> done 
+uv run python run_reconstruction.py --sweep_id hqt6bwmp --dataset kwave_blob --top_k 5 --indices 34 18 19 11 23 2 7 69 --report_plots --tag npz -> done
+uv run python run_reconstruction.py --sweep_id ti60qmx3 --dataset kwave_geom --top_k 5 --indices 23 11 5 22 28 9 14 7 --report_plots --tag npz -> Done
+uv run python run_reconstruction.py --sweep_id ti60qmx3 --dataset kwave_blob --top_k 5 --indices 34 18 19 11 23 2 7 69 --report_plots --tag npz -> Done
+uv run python run_reconstruction.py --sweep_id ti60qmx3 --dataset phantom     --top_k 5 --report_plots --tag npz -> Done
+uv run python run_reconstruction.py --sweep_id ti60qmx3 --dataset breast_data --top_k 5 --report_plots --tag npz -> Done
+#finished
+
+# ── SECTION 3 — Denoised (middle-rung) compose sources (J5/J7) ──────────────
+# Regularizer = q2p4zv3e (joint sweep), reconstructor = ti60qmx3 top-5.
+uv run python run_denoised_reconstruction.py --dataset kwave_geom --regularizer_sweep_id q2p4zv3e --reconstructor_sweep_id ti60qmx3 --top_k 5 --indices 23 11 5 22 28 9 14 7 --report_plots --tag npz  -> Done
+uv run python run_denoised_reconstruction.py --dataset kwave_blob --regularizer_sweep_id q2p4zv3e --reconstructor_sweep_id ti60qmx3 --top_k 5 --indices 34 18 19 11 23 2 7 69 --report_plots --tag npz -> Done
+#finished
+uv run python run_denoised_reconstruction.py --dataset phantom     --regularizer_sweep_id q2p4zv3e --reconstructor_sweep_id ti60qmx3 --top_k 5 --report_plots --tag npz -> Done
+uv run python run_denoised_reconstruction.py --dataset breast_data --regularizer_sweep_id q2p4zv3e --reconstructor_sweep_id ti60qmx3 --top_k 5 --report_plots --tag npz -> Done 
+#finished

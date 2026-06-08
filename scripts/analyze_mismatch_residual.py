@@ -224,10 +224,8 @@ def _save(fig, save_path):
     p = Path(save_path)
     p.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(p.with_suffix(".svg"), format="svg", bbox_inches="tight")
-    fig.savefig(p.with_suffix(".png"), format="png", dpi=150,
-                bbox_inches="tight")
     plt.close(fig)
-    print(f"  saved -> {p.with_suffix('.svg')}  (+ .png)")
+    print(f"  saved -> {p.with_suffix('.svg')}")
 
 
 def main():
