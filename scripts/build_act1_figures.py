@@ -98,18 +98,18 @@ def build_F5(out_path: Path) -> None:
     # ── Right panel: equation block
     ax_eq.axis("off")
     eq_lines = [
-        r"$\bf{Per\ ray:}$",
-        r"$t_i = \displaystyle\int_{\rm ray\,\,i} s(\mathbf{r})\,d\ell$",
+        r"$\mathbf{Per\ ray:}$",
+        r"$t_i = \int_{\mathrm{ray}\,i} s(\mathbf{r})\,d\ell$",
         "",
-        r"$\bf{Discretised:}$",
-        r"$t_i = \displaystyle\sum_j L_{ij}\,s_j$",
-        r"$\quad L_{ij}\;=$ length of ray $i$ inside voxel $j$",
+        r"$\mathbf{Discretised:}$",
+        r"$t_i = \sum_j L_{ij}\,s_j$",
+        r"$L_{ij}\,=\,$length of ray $i$ inside voxel $j$",
         "",
-        r"$\bf{Stack\ all\ rays:}$",
+        r"$\mathbf{Stack\ all\ rays:}$",
         r"$\mathbf{d} = \mathbf{L}\,\mathbf{s}$",
         "",
-        r"$\mathbf{d}\in\mathbb{R}^{131{,}072},\;$"
-        r"$\mathbf{s}\in\mathbb{R}^{4{,}096},\;$"
+        r"$\mathbf{d}\in\mathbb{R}^{131{,}072},\,$"
+        r"$\mathbf{s}\in\mathbb{R}^{4{,}096}$",
         r"$\mathbf{L}\in\mathbb{R}^{131{,}072\times 4{,}096}$",
     ]
     y = 0.95
@@ -235,6 +235,7 @@ DEFAULT_F7_SOURCES = [
     ("kwave_geom",   "inr/hqt6bwmp/kwave_geom/20260523_095618_npz/recons.npz"),
     ("kwave_blob",   "inr/hqt6bwmp/kwave_blob/20260523_095624_npz/recons.npz"),
     ("Phantom",      "inr/ti60qmx3/phantom/20260523_101853_npz/recons.npz"),
+    ("Breast",       "inr/ti60qmx3/breast_data/20260523_101856_npz/recons.npz"),
 ]
 
 
@@ -269,7 +270,7 @@ def build_F7(out_path: Path, sources=None, data_root: Path | None = None) -> Non
         return
 
     n = len(fields)
-    fig, axes = plt.subplots(1, n, figsize=(3.0 * n, 3.4))
+    fig, axes = plt.subplots(1, n, figsize=(2.5 * n, 3.0))
     if n == 1:
         axes = [axes]
     vmin = min(img.min() for img in fields)
@@ -284,7 +285,7 @@ def build_F7(out_path: Path, sources=None, data_root: Path | None = None) -> Non
     cbar.set_label("SoS (m/s)", fontsize=9)
     cbar.ax.tick_params(labelsize=8)
 
-    fig.suptitle("Ground-truth SoS fields across the four-step ladder of realism",
+    fig.suptitle("Ground truth SoS across domain datasets",
                  fontsize=11, fontweight="bold", y=1.02)
     _save(fig, out_path)
 
