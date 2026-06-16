@@ -210,7 +210,7 @@ def fig_per_pair(mismatch_by_ds, save_path):
     ax.axhline(100.0 / N_PAIRS, color="gray", ls="--", lw=1,
                label=f"uniform ({100.0/N_PAIRS:.1f}%)")
     ax.set_xticks(x + width * (len(mismatch_by_ds) - 1) / 2)
-    ax.set_xticklabels([f"Pair {p}" for p in range(N_PAIRS)])
+    ax.set_xticklabels([f"P{p + 1}" for p in range(N_PAIRS)])
     ax.set_xlabel("Firing pair", fontsize=12)
     ax.set_ylabel("Per-pair residual energy share (%)", fontsize=12)
     ax.tick_params(axis="both", labelsize=11)
