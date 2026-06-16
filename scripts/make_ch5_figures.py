@@ -894,6 +894,40 @@ def _draw_qualitative_row(images, col_labels, save_path: Path,
     print(f"  [qual-row] saved -> {save_path.with_suffix('.svg')}")
 
 
+def _load_dataset_canonical_gt(mat_filename: str) -> list[np.ndarray] | None:
+    """Return the ground-truth slowness slabs from ``DATA_DIR/DL-based-SoS/<mat>``,
+    in the order stored by the source ``.mat`` file (sample I = row 0, etc.).
+
+    Used by figure_J7 so the PhantomSet column labelled "I" in the figure
+    truly corresponds to dataset sample 0, regardless of how each pipeline
+    run permuted its npz output.
+
+    Returns ``None`` if the file cannot be opened (e.g. running off the
+    server) so callers can fall back to the recon-npz GT order.
+    """
+    try:
+        import h5py
+        from inr_sos.io.paths import DATA_DIR
+    except Exception as exc:
+        print(f"  [canonical-gt] cannot import DATA_DIR/h5py: {exc}; falling back.")
+        return None
+
+    path = Path(DATA_DIR) / "DL-based-SoS" / mat_filename
+    if not path.exists():
+        print(f"  [canonical-gt] {path} not found; falling back to recon-npz order.")
+        return None
+    try:
+        with h5py.File(path, "r") as f:
+            if "imgs_gt" not in f:
+                print(f"  [canonical-gt] {path} has no 'imgs_gt' key; falling back.")
+                return None
+            imgs = np.array(f["imgs_gt"])
+        return [imgs[i] for i in range(imgs.shape[0])]
+    except Exception as exc:
+        print(f"  [canonical-gt] {path} read failed ({exc}); falling back.")
+        return None
+
+
 def _match_permutation(src_gt, ref_gt) -> list[int]:
     """Find indices into ``src_gt`` that align it to ``ref_gt`` order.
 
@@ -1639,24 +1673,37 @@ def figure_J7() -> None:
         """
         return _match_permutation(src_data["gt"], ref_gt_imgs)
 
-    # ── PhantomSet grid (Req 1: SJ + MR re-aligned to dataset order) ──────
+    # ── PhantomSet grid (Req 1: every row re-aligned to dataset order) ────
     def _build_phantom_panel():
         recon = _load_npz(dirs["ti60qmx3_phantom_recon"],    "ti60qmx3_phantom_recon")
         dn    = _load_npz(dirs["ti60qmx3_phantom_denoised"], "ti60qmx3_phantom_denoised")
         jt    = _load_npz(dirs["z7bs7iy5_phantom_honest"],   "z7bs7iy5_phantom_honest")
 
-        n_samples = len(recon["gt"])
-        n_cols    = min(4, n_samples)
-        c_idx     = _col_indices(n_samples, n_cols)
-        ref_gt    = [recon["gt"][i] for i in c_idx]
+        # ANCHOR: the source .mat file's `imgs_gt` order — that is the
+        # "natural" dataset order (sample I, II, ... in the figure column
+        # headers). Every pipeline run may shuffle samples on save; we use
+        # the .mat as the canonical reference and re-align all rows.
+        canonical = _load_dataset_canonical_gt("test_PhantomData.mat")
+        if canonical is not None:
+            n_cols = min(4, len(canonical))
+            ref_gt = canonical[:n_cols]
+            recon_perm = _match_permutation(recon["gt"], ref_gt)
+            print(f"  [J7/PhantomSet] recon -> dataset perm: {recon_perm}")
+        else:
+            # Fallback when the .mat is not reachable (off-server runs):
+            # the recon's own gt order becomes the reference.
+            n_samples = len(recon["gt"])
+            n_cols    = min(4, n_samples)
+            recon_perm = _col_indices(n_samples, n_cols)
+            ref_gt    = [recon["gt"][i] for i in recon_perm]
 
-        # Permutations against the dataset/GT order. Both MR and SJ may store
-        # samples in a different order than the recon run; resolving by GT
-        # match guarantees column k is the same physical sample everywhere.
+        # Permutations of MR and SJ against the canonical reference.
         dn_perm = _match_permutation(dn["gt"], ref_gt)
         jt_perm = _match_permutation(jt["gt"], ref_gt)
+        print(f"  [J7/PhantomSet] MR    -> dataset perm: {dn_perm}")
+        print(f"  [J7/PhantomSet] SJ    -> dataset perm: {jt_perm}")
 
-        gt_imgs = [_to_sos_img(recon["gt"][i]) for i in c_idx]
+        gt_imgs = [_to_sos_img(recon["gt"][i]) for i in recon_perm]
         has_gt = not np.all(recon["gt"] == 0.0)
         if not has_gt:
             print("  [J7/PhantomSet] WARNING: GT absent (placeholder zeros).")
@@ -1666,7 +1713,7 @@ def figure_J7() -> None:
 
         try:
             _, arr_r = _pick_rank(recon["recons"], 1)
-            row_std = _row(arr_r, c_idx)
+            row_std = _row(arr_r, recon_perm)
         except KeyError:
             row_std = [np.full_like(gt_imgs[0], np.nan) for _ in gt_imgs]
         try:
@@ -1679,10 +1726,10 @@ def figure_J7() -> None:
             row_jt = _row(arr_jt, jt_perm)
         except KeyError:
             row_jt = [np.full_like(gt_imgs[0], np.nan) for _ in gt_imgs]
-        row_L2 = (_row(recon["recons"]["L2"], c_idx)
+        row_L2 = (_row(recon["recons"]["L2"], recon_perm)
                   if "L2" in recon["recons"]
                   else [np.full_like(gt_imgs[0], np.nan) for _ in gt_imgs])
-        row_L1 = (_row(recon["recons"]["L1"], c_idx)
+        row_L1 = (_row(recon["recons"]["L1"], recon_perm)
                   if "L1" in recon["recons"]
                   else [np.full_like(gt_imgs[0], np.nan) for _ in gt_imgs])
 
@@ -1737,7 +1784,7 @@ def figure_J7() -> None:
         _draw_qualitative_row(
             breast_imgs, breast_lbls,
             save_path=_FIG_DIR / "5.4_realdata_breast.svg",
-            title="BreastSet (qualitative — single in-vivo sample, no ground truth)",
+            title="BreastSet",
         )
     else:
         print("  [J7/BreastSet] no reconstructions available; skipping qualitative figure.")
