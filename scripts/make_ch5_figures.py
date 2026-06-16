@@ -701,7 +701,7 @@ def _draw_combined_dataset_grid(
 
 def _draw_combined_metrics(
     geom_results: dict[str, list[dict]],
-    blob_results: dict[str, list[dict]],
+    blob_results: dict[str, list[dict]] | None,
     save_path: Path,
     *,
     metrics: tuple[str, ...] = ("MAE", "RMSE", "SSIM", "CNR"),
@@ -710,16 +710,19 @@ def _draw_combined_metrics(
     short_labels: list[str] | None = None,
     group_labels: tuple[str, str] = ("GeomSet", "BlobSet"),
 ) -> None:
-    """4-metric box-plot figure split left | right by a dashed line.
+    """4-metric box-plot figure.
 
-    Method ordering MUST be identical in geom_results and blob_results.
-    INR-method x-labels default to numeric ranks 1, 2, ... ; baselines keep
-    "L1"/"L2". Caller may pass an explicit ``short_labels`` list to override.
-    The full method legend belongs in the LaTeX caption (no in-figure legend).
+    If ``blob_results`` is provided, the figure is split left | right by a
+    dashed line and the two panels share the metric axes. If ``blob_results``
+    is ``None``, a single-panel (geom-only) figure is drawn — used by §5.4
+    after the breast metrics panel was dropped (no valid in-vivo GT).
+
+    When two panels are given, method ordering MUST be identical between them.
     """
     p = _get_p()
     method_names = list(geom_results.keys())
-    if list(blob_results.keys()) != method_names:
+    single_panel = blob_results is None
+    if not single_panel and list(blob_results.keys()) != method_names:
         raise ValueError("geom and blob results must have identical methods/order")
 
     metric_titles = {"MAE": "MAE (m/s)", "RMSE": "RMSE (m/s)",
@@ -757,39 +760,48 @@ def _draw_combined_metrics(
         v = [r["metrics"][mk] for r in res[lbl] if mk in r.get("metrics", {})]
         return v if v else [float("nan")]
 
+    common_box_kw = dict(
+        widths=0.55, patch_artist=True, notch=False,
+        medianprops=dict(color="black", linewidth=1.2),
+        whiskerprops=dict(linewidth=0.7),
+        capprops=dict(linewidth=0.7),
+        flierprops=dict(marker="o", markersize=2.5,
+                        markerfacecolor="none", markeredgewidth=0.5),
+        boxprops=dict(linewidth=0.5),
+    )
+
+    # Single-panel mode uses a narrower figure since there's no second half.
+    eff_width = (figwidth * 0.55) if single_panel else figwidth
+
     with matplotlib.rc_context(p.SERIF_RCPARAMS):
         fig, axes = plt.subplots(1, len(metrics),
-                                 figsize=(figwidth, fig_height),
+                                 figsize=(eff_width, fig_height),
                                  sharey=False)
         if len(metrics) == 1:
             axes = [axes]
 
         for ax, mk in zip(axes, metrics):
             data_g = [_vals(geom_results, lbl, mk) for lbl in method_names]
-            data_b = [_vals(blob_results, lbl, mk) for lbl in method_names]
-
-            common_box_kw = dict(
-                widths=0.55, patch_artist=True, notch=False,
-                medianprops=dict(color="black", linewidth=1.2),
-                whiskerprops=dict(linewidth=0.7),
-                capprops=dict(linewidth=0.7),
-                flierprops=dict(marker="o", markersize=2.5,
-                                markerfacecolor="none", markeredgewidth=0.5),
-                boxprops=dict(linewidth=0.5),
-            )
             bp_g = ax.boxplot(data_g, positions=x_geom, **common_box_kw)
-            bp_b = ax.boxplot(data_b, positions=x_blob, **common_box_kw)
             for patch, lbl in zip(bp_g["boxes"], method_names):
                 patch.set_facecolor(method_colors[lbl]); patch.set_alpha(0.65)
-            for patch, lbl in zip(bp_b["boxes"], method_names):
-                patch.set_facecolor(method_colors[lbl]); patch.set_alpha(0.65)
 
-            # Dashed vertical separator
-            ax.axvline(x_sep, color="black", linestyle="--",
-                       linewidth=0.8, alpha=0.55)
+            if not single_panel:
+                data_b = [_vals(blob_results, lbl, mk) for lbl in method_names]
+                bp_b = ax.boxplot(data_b, positions=x_blob, **common_box_kw)
+                for patch, lbl in zip(bp_b["boxes"], method_names):
+                    patch.set_facecolor(method_colors[lbl]); patch.set_alpha(0.65)
 
-            ax.set_xticks(list(x_geom) + list(x_blob))
-            ax.set_xticklabels(short_labels * 2, fontsize=6.5)
+                # Dashed vertical separator between panels
+                ax.axvline(x_sep, color="black", linestyle="--",
+                           linewidth=0.8, alpha=0.55)
+
+                ax.set_xticks(list(x_geom) + list(x_blob))
+                ax.set_xticklabels(short_labels * 2, fontsize=6.5)
+            else:
+                ax.set_xticks(list(x_geom))
+                ax.set_xticklabels(short_labels, fontsize=6.5)
+
             ax.set_title(metric_titles.get(mk, mk), fontsize=9, pad=14)
             ax.spines["top"].set_visible(False)
             ax.spines["right"].set_visible(False)
@@ -801,16 +813,24 @@ def _draw_combined_metrics(
             # Group headers above each half (in axes coordinates so they sit
             # right under the metric title and don't depend on the y-range).
             mid_g = (x_geom[0] + x_geom[-1]) / 2
-            mid_b = (x_blob[0] + x_blob[-1]) / 2
-            xmin = x_geom[0] - 0.6
-            xmax = x_blob[-1] + 0.6
-            ax.set_xlim(xmin, xmax)
-            ax.text((mid_g - xmin) / (xmax - xmin), 1.02, group_labels[0],
-                    transform=ax.transAxes, ha="center", va="bottom",
-                    fontsize=8, fontweight="bold")
-            ax.text((mid_b - xmin) / (xmax - xmin), 1.02, group_labels[1],
-                    transform=ax.transAxes, ha="center", va="bottom",
-                    fontsize=8, fontweight="bold")
+            if single_panel:
+                xmin = x_geom[0] - 0.6
+                xmax = x_geom[-1] + 0.6
+                ax.set_xlim(xmin, xmax)
+                ax.text((mid_g - xmin) / (xmax - xmin), 1.02, group_labels[0],
+                        transform=ax.transAxes, ha="center", va="bottom",
+                        fontsize=8, fontweight="bold")
+            else:
+                mid_b = (x_blob[0] + x_blob[-1]) / 2
+                xmin = x_geom[0] - 0.6
+                xmax = x_blob[-1] + 0.6
+                ax.set_xlim(xmin, xmax)
+                ax.text((mid_g - xmin) / (xmax - xmin), 1.02, group_labels[0],
+                        transform=ax.transAxes, ha="center", va="bottom",
+                        fontsize=8, fontweight="bold")
+                ax.text((mid_b - xmin) / (xmax - xmin), 1.02, group_labels[1],
+                        transform=ax.transAxes, ha="center", va="bottom",
+                        fontsize=8, fontweight="bold")
 
         fig.tight_layout(pad=0.6)
         p.save(fig, save_path, png_fallback=False)
@@ -822,6 +842,93 @@ def _col_indices(n_total: int, n_want: int) -> list[int]:
     """Return n_want indices evenly spread over [0, n_total)."""
     n = min(n_want, n_total)
     return np.linspace(0, n_total - 1, n, dtype=int).tolist()
+
+
+def _draw_qualitative_row(images, col_labels, save_path: Path,
+                          title: str = "", cmap: str = "RdBu_r") -> None:
+    """1-row × N-col qualitative grid for a single sample across methods.
+
+    No GT, no per-cell metric annotation. Used by §5.4 for the breast sample
+    where there is no valid in-vivo ground truth and only a qualitative
+    comparison across reconstruction methods is meaningful.
+    """
+    p = _get_p()
+    n = len(images)
+    norm = _shared_norm(images) if images else None
+
+    cell_w = 1.8
+    fig_w = cell_w * n + 1.0     # +1 for the right-side colorbar
+    fig_h = cell_w + 0.6         # +0.6 for the column titles
+
+    with matplotlib.rc_context(p.SERIF_RCPARAMS):
+        fig, axes = plt.subplots(1, n, figsize=(fig_w, fig_h), squeeze=False)
+        axes = axes[0]
+        fig.patch.set_facecolor("white")
+
+        for ax, img, lbl in zip(axes, images, col_labels):
+            ax.imshow(img, cmap=cmap, norm=norm,
+                      interpolation="nearest", origin="upper")
+            ax.set_xticks([]); ax.set_yticks([])
+            for sp in ax.spines.values():
+                sp.set_linewidth(0.4)
+            ax.set_title(lbl, fontsize=8, pad=3)
+
+        if title:
+            fig.suptitle(title, fontsize=11, fontweight="bold", y=0.995)
+
+        fig.subplots_adjust(left=0.02, right=0.88,
+                            top=0.78 if title else 0.85,
+                            bottom=0.04, wspace=0.05)
+
+        # Right-side colorbar
+        if norm is not None:
+            cb_ax = fig.add_axes([0.90, 0.05, 0.025, 0.72])
+            sm = plt.cm.ScalarMappable(cmap=cmap, norm=norm)
+            sm.set_array([])
+            cb = fig.colorbar(sm, cax=cb_ax)
+            cb.set_label("SoS (m/s)", fontsize=8, labelpad=4)
+            cb.ax.tick_params(labelsize=7)
+
+        p.save(fig, save_path, png_fallback=False)
+        plt.close(fig)
+    print(f"  [qual-row] saved -> {save_path.with_suffix('.svg')}")
+
+
+def _match_permutation(src_gt, ref_gt) -> list[int]:
+    """Find indices into ``src_gt`` that align it to ``ref_gt`` order.
+
+    ``ref_gt`` and ``src_gt`` are arrays of the same physical GT samples but
+    possibly stored in different orders by two pipeline runs. For each
+    ``ref_gt[k]`` we pick the unused ``src_gt[i]`` that minimises L2 distance
+    (after flattening). Returned ``perm`` is such that
+    ``src_gt[perm[k]] ≈ ref_gt[k]``.
+
+    If shapes disagree or no candidate matches, falls back to identity for
+    that slot.
+    """
+    n_ref = len(ref_gt)
+    n_src = len(src_gt)
+    perm: list[int] = []
+    used: set[int] = set()
+    for k in range(n_ref):
+        rk = np.asarray(ref_gt[k]).reshape(-1).astype(np.float64, copy=False)
+        best_i = -1
+        best_d = float("inf")
+        for i in range(n_src):
+            if i in used:
+                continue
+            si = np.asarray(src_gt[i]).reshape(-1).astype(np.float64, copy=False)
+            if si.shape != rk.shape:
+                continue
+            d = float(np.linalg.norm(si - rk))
+            if d < best_d:
+                best_d = d
+                best_i = i
+        if best_i == -1:
+            best_i = k if k < n_src else 0
+        used.add(best_i)
+        perm.append(best_i)
+    return perm
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -1497,87 +1604,145 @@ def figure_J6() -> None:
 # ──────────────────────────────────────────────────────────────────────────────
 
 def figure_J7() -> None:
-    """5.4_realdata_grid.svg — single side-by-side PhantomSet | BreastSet figure.
+    """§5.4 real-data figures — splits into THREE files:
 
-    Rows : GT | Standalone | Meas. Reg. | Staged Joint | L2 | L1
-    Cols : 4 phantom samples | dashed sep | 2 breast samples
-    Shared colorbar; phantom/breast may have placeholder GT (handled).
+      * ``5.4_realdata_grid.svg``     — PhantomSet grid (GT + 5 methods × 4 samples).
+      * ``5.4_realdata_breast.svg``   — single-row qualitative BreastSet figure
+                                        (no GT row, no metric annotations, one sample
+                                        across methods).
+      * ``5.4_realdata_metrics.svg``  — PhantomSet-only 4-metric box-plot
+                                        (BreastSet metrics dropped: no in-vivo GT,
+                                        and the 2-sample box plot was meaningless).
+
+    Comment-B fixes folded in:
+      * Req 1 — Staged-Joint sample order in ``z7bs7iy5`` differs from the
+        ``ti60qmx3`` (dataset) order; per-method permutations against the GT
+        re-align the SJ (and the MR, as a sanity check) row to dataset order.
+      * Req 2 — breast GT is a supervisor analytical proxy, not a real in-vivo
+        truth; the two stored slots are bit-identical (= one sample). Breast
+        becomes a qualitative single-row figure with no GT.
+      * Req 3 — no breast metrics panel.
     """
-    print("\n[J7] Building combined real-data grid figure ...")
+    print("\n[J7] Building §5.4 real-data figures ...")
     dirs = _require_sources(
         "ti60qmx3_phantom_recon",    "ti60qmx3_breast_recon",
         "z7bs7iy5_phantom_honest",   "z7bs7iy5_breast_honest",
         "ti60qmx3_phantom_denoised", "ti60qmx3_breast_denoised",
     )
 
-    # Per-dataset row builder — produces (title, col_labels, rows_imgs).
-    def _build_panel(title, n_target_cols, recon_key, dn_key, jt_key):
-        recon_data = _load_npz(dirs[recon_key], recon_key)
-        dn_data    = _load_npz(dirs[dn_key],    dn_key)
-        jt_data    = _load_npz(dirs[jt_key],    jt_key)
+    def _gt_aligned_indices(src_data, ref_gt_imgs):
+        """Recover the indices into ``src_data`` that match dataset/GT order.
 
-        n_samples = len(recon_data["gt"])
-        n_cols    = min(n_target_cols, n_samples)
+        ``src_data["gt"]`` and ``ref_gt_imgs`` are the same physical GTs in
+        possibly-different orders. Returns the permutation (list of int) that
+        re-orders ``src_data`` to match ``ref_gt_imgs``.
+        """
+        return _match_permutation(src_data["gt"], ref_gt_imgs)
+
+    # ── PhantomSet grid (Req 1: SJ + MR re-aligned to dataset order) ──────
+    def _build_phantom_panel():
+        recon = _load_npz(dirs["ti60qmx3_phantom_recon"],    "ti60qmx3_phantom_recon")
+        dn    = _load_npz(dirs["ti60qmx3_phantom_denoised"], "ti60qmx3_phantom_denoised")
+        jt    = _load_npz(dirs["z7bs7iy5_phantom_honest"],   "z7bs7iy5_phantom_honest")
+
+        n_samples = len(recon["gt"])
+        n_cols    = min(4, n_samples)
         c_idx     = _col_indices(n_samples, n_cols)
-        dn_c_idx  = _col_indices(len(dn_data["gt"]), n_cols)
-        jt_c_idx  = _col_indices(len(jt_data["gt"]), n_cols)
+        ref_gt    = [recon["gt"][i] for i in c_idx]
 
-        gt_imgs = [_to_sos_img(recon_data["gt"][i]) for i in c_idx]
-        has_gt = not np.all(recon_data["gt"] == 0.0)
+        # Permutations against the dataset/GT order. Both MR and SJ may store
+        # samples in a different order than the recon run; resolving by GT
+        # match guarantees column k is the same physical sample everywhere.
+        dn_perm = _match_permutation(dn["gt"], ref_gt)
+        jt_perm = _match_permutation(jt["gt"], ref_gt)
+
+        gt_imgs = [_to_sos_img(recon["gt"][i]) for i in c_idx]
+        has_gt = not np.all(recon["gt"] == 0.0)
         if not has_gt:
-            print(f"  [J7/{title}] WARNING: GT absent (placeholder zeros).")
+            print("  [J7/PhantomSet] WARNING: GT absent (placeholder zeros).")
 
-        # Build each row.
-        def _row_or_blank(arr, idx_list):
+        def _row(arr, idx_list):
             return [_to_sos_img(arr[i]) for i in idx_list]
 
         try:
-            _, arr_r = _pick_rank(recon_data["recons"], 1)
-            row_std = _row_or_blank(arr_r, c_idx)
+            _, arr_r = _pick_rank(recon["recons"], 1)
+            row_std = _row(arr_r, c_idx)
         except KeyError:
             row_std = [np.full_like(gt_imgs[0], np.nan) for _ in gt_imgs]
         try:
-            _, arr_dn = _pick_rank(dn_data["recons"], 1)
-            row_dn = _row_or_blank(arr_dn, dn_c_idx)
+            _, arr_dn = _pick_rank(dn["recons"], 1)
+            row_dn = _row(arr_dn, dn_perm)
         except KeyError:
             row_dn = [np.full_like(gt_imgs[0], np.nan) for _ in gt_imgs]
         try:
-            _, arr_jt = _pick_rank(jt_data["recons"], 1)
-            row_jt = _row_or_blank(arr_jt, jt_c_idx)
+            _, arr_jt = _pick_rank(jt["recons"], 1)
+            row_jt = _row(arr_jt, jt_perm)
         except KeyError:
             row_jt = [np.full_like(gt_imgs[0], np.nan) for _ in gt_imgs]
-        row_L2 = (_row_or_blank(recon_data["recons"]["L2"], c_idx)
-                  if "L2" in recon_data["recons"]
+        row_L2 = (_row(recon["recons"]["L2"], c_idx)
+                  if "L2" in recon["recons"]
                   else [np.full_like(gt_imgs[0], np.nan) for _ in gt_imgs])
-        row_L1 = (_row_or_blank(recon_data["recons"]["L1"], c_idx)
-                  if "L1" in recon_data["recons"]
+        row_L1 = (_row(recon["recons"]["L1"], c_idx)
+                  if "L1" in recon["recons"]
                   else [np.full_like(gt_imgs[0], np.nan) for _ in gt_imgs])
 
-        return (title, _col_headers(n_cols),
-                [gt_imgs, row_std, row_dn, row_jt, row_L2, row_L1],
-                has_gt)
+        return (
+            "PhantomSet",
+            _col_headers(n_cols),
+            [gt_imgs, row_std, row_dn, row_jt, row_L2, row_L1],
+            has_gt,
+        )
 
-    p_title, p_cols, p_rows, p_has_gt = _build_panel(
-        "PhantomSet", 4,
-        "ti60qmx3_phantom_recon", "ti60qmx3_phantom_denoised",
-        "z7bs7iy5_phantom_honest",
-    )
-    b_title, b_cols, b_rows, b_has_gt = _build_panel(
-        "BreastSet", 2,
-        "ti60qmx3_breast_recon", "ti60qmx3_breast_denoised",
-        "z7bs7iy5_breast_honest",
-    )
-
-    panels = [(p_title, p_cols, p_rows), (b_title, b_cols, b_rows)]
+    p_title, p_cols, p_rows, p_has_gt = _build_phantom_panel()
     _draw_combined_dataset_grid(
-        panels,
+        [(p_title, p_cols, p_rows)],
         row_labels=["GT", "Standalone", "Meas.\nReg.",
                     "Staged\nJoint", "L2", "L1"],
         save_path=_FIG_DIR / "5.4_realdata_grid.svg",
-        annotate_mae_cnr=(p_has_gt and b_has_gt),
+        annotate_mae_cnr=p_has_gt,
     )
 
-    # ── Combined metrics box plot — PhantomSet | BreastSet ─────────────────
+    # ── BreastSet qualitative — Req 2: no GT row, one sample, no metrics ──
+    breast_recon = _load_npz(dirs["ti60qmx3_breast_recon"],    "ti60qmx3_breast_recon")
+    breast_dn    = _load_npz(dirs["ti60qmx3_breast_denoised"], "ti60qmx3_breast_denoised")
+    breast_jt    = _load_npz(dirs["z7bs7iy5_breast_honest"],   "z7bs7iy5_breast_honest")
+
+    breast_imgs: list[np.ndarray] = []
+    breast_lbls: list[str] = []
+    sample_i = 0   # the two stored breast slots are bit-identical (= 1 sample)
+    try:
+        _, arr_r = _pick_rank(breast_recon["recons"], 1)
+        breast_imgs.append(_to_sos_img(arr_r[sample_i]))
+        breast_lbls.append("Standalone")
+    except (KeyError, IndexError):
+        pass
+    try:
+        _, arr_dn = _pick_rank(breast_dn["recons"], 1)
+        breast_imgs.append(_to_sos_img(arr_dn[sample_i]))
+        breast_lbls.append("Meas. Reg.")
+    except (KeyError, IndexError):
+        pass
+    try:
+        _, arr_jt = _pick_rank(breast_jt["recons"], 1)
+        breast_imgs.append(_to_sos_img(arr_jt[sample_i]))
+        breast_lbls.append("Staged Joint")
+    except (KeyError, IndexError):
+        pass
+    for baseline in ("L2", "L1"):
+        if baseline in breast_recon["recons"]:
+            breast_imgs.append(_to_sos_img(breast_recon["recons"][baseline][sample_i]))
+            breast_lbls.append(baseline)
+
+    if breast_imgs:
+        _draw_qualitative_row(
+            breast_imgs, breast_lbls,
+            save_path=_FIG_DIR / "5.4_realdata_breast.svg",
+            title="BreastSet (qualitative — single in-vivo sample, no ground truth)",
+        )
+    else:
+        print("  [J7/BreastSet] no reconstructions available; skipping qualitative figure.")
+
+    # ── PhantomSet metrics (Req 3: breast panel dropped) ──────────────────
     def _build_metrics(recon_key, dn_key, jt_key):
         recon_data = _load_npz(dirs[recon_key], recon_key)
         dn_data    = _load_npz(dirs[dn_key],    dn_key)
@@ -1610,14 +1775,11 @@ def figure_J7() -> None:
     phantom_res = _build_metrics("ti60qmx3_phantom_recon",
                                  "ti60qmx3_phantom_denoised",
                                  "z7bs7iy5_phantom_honest")
-    breast_res  = _build_metrics("ti60qmx3_breast_recon",
-                                 "ti60qmx3_breast_denoised",
-                                 "z7bs7iy5_breast_honest")
     _draw_combined_metrics(
-        phantom_res, breast_res,
+        phantom_res, None,
         save_path=_FIG_DIR / "5.4_realdata_metrics.svg",
         short_labels=["Std", "MR", "SJ", "L2", "L1"],
-        group_labels=("PhantomSet", "BreastSet"),
+        group_labels=("PhantomSet", ""),
     )
     print("  [J7] done.")
 
