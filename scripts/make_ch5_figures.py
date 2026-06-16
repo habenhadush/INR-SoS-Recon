@@ -1054,6 +1054,70 @@ def figure_J5() -> None:
 
 
 # ──────────────────────────────────────────────────────────────────────────────
+# Figure J5g — Blind measurement regularisation: reconstruction grid
+# ──────────────────────────────────────────────────────────────────────────────
+
+def figure_J5g() -> None:
+    """5.3_blind_grid.svg — side-by-side GeomSet | BlobSet recon grid for the
+    measurement-regularised (MR) rung. Companion to J5's metrics box-plot.
+
+    Rows: GT | Standalone | Meas. Reg. | L2 | L1.
+    Cols: all geom samples + dashed separator + all blob samples.
+    Shared diverging colormap centred on background sound speed.
+    """
+    print("\n[J5g] Building MR reconstruction grid figure ...")
+    dirs = _require_sources(
+        "ti60qmx3_geom_recon",    "ti60qmx3_blob_recon",
+        "ti60qmx3_geom_denoised", "ti60qmx3_blob_denoised",
+    )
+
+    g_recon = _load_npz(dirs["ti60qmx3_geom_recon"],     "ti60qmx3_geom_recon")
+    b_recon = _load_npz(dirs["ti60qmx3_blob_recon"],     "ti60qmx3_blob_recon")
+    g_mr    = _load_npz(dirs["ti60qmx3_geom_denoised"],  "ti60qmx3_geom_denoised")
+    b_mr    = _load_npz(dirs["ti60qmx3_blob_denoised"],  "ti60qmx3_blob_denoised")
+
+    try:
+        _, arr_gr = _pick_rank(g_recon["recons"], 1)
+        _, arr_br = _pick_rank(b_recon["recons"], 1)
+        _, arr_gm = _pick_rank(g_mr["recons"],    1)
+        _, arr_bm = _pick_rank(b_mr["recons"],    1)
+    except KeyError as exc:
+        print(f"  [J5g] rank#1 missing: {exc}")
+        return
+
+    def _panel(title, data_gt, arr_std, arr_mr):
+        n = len(data_gt["gt"])
+        gt_imgs = [_to_sos_img(data_gt["gt"][i]) for i in range(n)]
+        def _baseline_row(key):
+            if key in data_gt["recons"]:
+                arr = data_gt["recons"][key]
+                return [_to_sos_img(arr[i]) for i in range(n)]
+            return [np.full_like(gt_imgs[0], np.nan) for _ in gt_imgs]
+        return (
+            title,
+            _col_headers(n),
+            [
+                gt_imgs,
+                [_to_sos_img(arr_std[i]) for i in range(n)],
+                [_to_sos_img(arr_mr[i])  for i in range(n)],
+                _baseline_row("L2"),
+                _baseline_row("L1"),
+            ],
+        )
+
+    panels = [
+        _panel("GeomSet", g_recon, arr_gr, arr_gm),
+        _panel("BlobSet", b_recon, arr_br, arr_bm),
+    ]
+    _draw_combined_dataset_grid(
+        panels,
+        row_labels=["GT", "Standalone", "Meas.\nReg.", "L2", "L1"],
+        save_path=_FIG_DIR / "5.3_blind_grid.svg",
+    )
+    print("  [J5g] done.")
+
+
+# ──────────────────────────────────────────────────────────────────────────────
 # Figure J5b — Staged joint grid (geom + blob combined)
 # ──────────────────────────────────────────────────────────────────────────────
 
@@ -1277,15 +1341,16 @@ def figure_J6() -> None:
             "CNR": cnr_r,
         })
 
-    # Short-code mapping: sweep → caption-friendly label, marker style.
+    # Sweep → descriptive label (matching the §5.3.3 ranking-table names that
+    # appear in the report text), marker style.
     # Color carries the DATASET (blue=geom, orange=blob); marker shape is a
-    # secondary cue (o=geom, ^=blob) except the flat-winner which uses ★.
+    # secondary cue (o=geom, ^=blob) except the flat winner which uses ★.
     SHORT = {
-        "ydma MAE-R1": "flat-winner",  # mean-MAE-selected replay of mean-MAE sweep
-        "ydma CNR-R1": "mean-err",     # CNR-selected replay of mean-MAE sweep
-        "q2p4 R1":     "ROI-comp",
+        "ydma MAE-R1": "flat winner",          # mean-MAE-selected replay of mean-error sweep
+        "ydma CNR-R1": "mean-error",           # CNR-selected replay of same sweep
+        "q2p4 R1":     "ROI-composite",
         "edj3 R1":     "pure-ROI",
-        "z7bs R1":     "full-IA",
+        "z7bs R1":     "full inclusion-aware",
     }
     DS_COLOR  = {"geom": "#1f77b4", "blob": "#d95f02"}
     DS_MARKER = {"geom": "o",        "blob": "^"}
@@ -1347,11 +1412,11 @@ def figure_J6() -> None:
         # spread the labels around the cluster so they don't overlap.
         # Approximate cluster spans: geom MAE ≈3.5, blob MAE ≈6.0; midpoint ≈4.7.
         LABEL_OFFSETS = {
-            "flat-winner": (-1.10, +0.50),   # upper-left
-            "mean-err":    (+0.90, -0.50),   # lower-right
-            "ROI-comp":    (-1.20, -0.50),   # lower-left
-            "pure-ROI":    (+0.90, +0.50),   # upper-right
-            "full-IA":     (+0.10, +0.90),   # straight up
+            "flat winner":          (-1.30, +0.50),   # upper-left
+            "mean-error":           (+1.00, -0.50),   # lower-right
+            "ROI-composite":        (-1.40, -0.50),   # lower-left
+            "pure-ROI":             (+0.90, +0.50),   # upper-right
+            "full inclusion-aware": (+0.10, +1.00),   # straight up
         }
         for lbl, pts in by_method.items():
             short = _short_for(lbl)
@@ -1397,7 +1462,7 @@ def figure_J6() -> None:
                    markersize=9, markeredgecolor="black", label="BlobSet"),
             Line2D([0], [0], marker=FLAT_MARKER, color="grey", linestyle="None",
                    markersize=11, markeredgecolor="black",
-                   label="flat-winner (mean-MAE\nreplay of mean-err sweep)"),
+                   label="flat winner (mean-MAE\nreplay of mean-error sweep)"),
             Line2D([0], [0], marker="s", color="lightgrey", linestyle="None",
                    markersize=8, markeredgecolor="dimgrey",
                    label="reference (L1/L2/standalone)"),
@@ -1645,6 +1710,7 @@ _FIGURE_MAP: dict[str, Any] = {
     "J3":  figure_J3,
     "J4":  figure_J4,
     "J5":  figure_J5,
+    "J5g": figure_J5g,
     "J5b": figure_J5b,
     "J6":  figure_J6,
     "J7":  figure_J7,
