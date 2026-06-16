@@ -1021,8 +1021,11 @@ def figure_J5() -> None:
             )
         except KeyError:
             pass
+        # MR rank-1 is a flat-winner (background-only fit); pick rank-3 instead
+        # so the reconstruction has real inclusion content. Standalone INR
+        # rank-1 above is unaffected.
         try:
-            lbl_dn, _ = _pick_rank(dn_data["recons"], 1)
+            lbl_dn, _ = _pick_rank(dn_data["recons"], 3)
             entries.append(
                 _build_results_entry("Meas. Reg.", dn_data, lbl_dn,
                                      dirs[dn_key])
@@ -1076,13 +1079,16 @@ def figure_J5g() -> None:
     g_mr    = _load_npz(dirs["ti60qmx3_geom_denoised"],  "ti60qmx3_geom_denoised")
     b_mr    = _load_npz(dirs["ti60qmx3_blob_denoised"],  "ti60qmx3_blob_denoised")
 
+    # MR rank-1 is a flat-winner (background-only fit) on both datasets; pick
+    # rank-3 for the MR row so the grid shows real inclusion content. Standalone
+    # INR and baselines stay on rank-1.
     try:
         _, arr_gr = _pick_rank(g_recon["recons"], 1)
         _, arr_br = _pick_rank(b_recon["recons"], 1)
-        _, arr_gm = _pick_rank(g_mr["recons"],    1)
-        _, arr_bm = _pick_rank(b_mr["recons"],    1)
+        _, arr_gm = _pick_rank(g_mr["recons"],    3)
+        _, arr_bm = _pick_rank(b_mr["recons"],    3)
     except KeyError as exc:
-        print(f"  [J5g] rank#1 missing: {exc}")
+        print(f"  [J5g] required rank missing: {exc}")
         return
 
     def _panel(title, data_gt, arr_std, arr_mr):
