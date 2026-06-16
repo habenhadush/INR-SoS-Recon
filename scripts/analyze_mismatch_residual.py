@@ -211,9 +211,11 @@ def fig_per_pair(mismatch_by_ds, save_path):
                label=f"uniform ({100.0/N_PAIRS:.1f}%)")
     ax.set_xticks(x + width * (len(mismatch_by_ds) - 1) / 2)
     ax.set_xticklabels([f"Pair {p}" for p in range(N_PAIRS)])
-    ax.set_ylabel(r"share of $\|e\|^2$  (%)")
+    ax.set_xlabel("Firing pair", fontsize=12)
+    ax.set_ylabel("Per-pair residual energy share (%)", fontsize=12)
+    ax.tick_params(axis="both", labelsize=11)
     # Legend outside the plot area (right side) so it never overlaps the bars.
-    ax.legend(fontsize=8, loc="upper left", bbox_to_anchor=(1.01, 1.0),
+    ax.legend(fontsize=11, loc="upper left", bbox_to_anchor=(1.01, 1.0),
               borderaxespad=0.0, frameon=False)
     ax.grid(axis="y", alpha=0.3)
     fig.tight_layout()
