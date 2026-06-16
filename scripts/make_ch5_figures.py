@@ -584,6 +584,7 @@ def _draw_combined_dataset_grid(
     figwidth: float = 11.0,
     cmap: str = "RdBu_r",
     annotate_mae_cnr: bool = True,
+    highlight_cell: tuple[int, int, int] | None = None,
 ) -> None:
     """One reconstruction grid with multiple column-groups SIDE-BY-SIDE.
 
@@ -595,6 +596,11 @@ def _draw_combined_dataset_grid(
         rows_imgs[r] is the list of images for row r in this panel; row 0 is
         treated as GT (used for shared diverging norm + MAE/CNR baseline).
     row_labels: ["GT", "Standalone", ...]  (must equal len(rows_imgs))
+    highlight_cell: ``(panel_idx, row_idx, col_idx)`` — optional. Draws a
+        dotted circle around the inclusion in this single cell to teach the
+        reader what "inclusion" refers to. The inclusion mask is derived
+        from the GT for that column; the circle is the same regardless of
+        which row is highlighted.
     """
     from matplotlib.lines import Line2D
 
@@ -660,6 +666,10 @@ def _draw_combined_dataset_grid(
                         p.annotate_cell(
                             ax, f"MAE: {mae:.1f}\nCNR: {cnr:.2f}", fontsize=5,
                         )
+                    if (highlight_cell is not None
+                            and highlight_cell == (pi, r, c)
+                            and c < len(gt_imgs)):
+                        _overlay_inclusion_circle(ax, gt_imgs[c])
 
         # Panel header titles, centred above each group
         for pi, (title, _, _) in enumerate(panels):
@@ -842,6 +852,46 @@ def _col_indices(n_total: int, n_want: int) -> list[int]:
     """Return n_want indices evenly spread over [0, n_total)."""
     n = min(n_want, n_total)
     return np.linspace(0, n_total - 1, n, dtype=int).tolist()
+
+
+def _overlay_inclusion_circle(
+    ax,
+    gt_img: np.ndarray,
+    *,
+    edgecolor: str = "#ffd60a",   # high-visibility gold; reads clearly on RdBu_r
+    linewidth: float = 1.3,
+    linestyle=(0, (1.5, 1.5)),    # dotted
+    margin_px: float = 1.5,
+) -> bool:
+    """Draw a dotted circle around the inclusion on a single axes.
+
+    Inclusion mask uses the same |gt - median(gt)| > 5 m/s rule as the CNR
+    metric (`_mae_cnr`); the circle is the bounding circle of that mask
+    (centroid + max-radius + ``margin_px`` padding). Returns ``True`` on
+    success, ``False`` if no inclusion was detectable.
+    """
+    from matplotlib.patches import Circle
+
+    bg = float(np.median(gt_img))
+    mask = np.abs(gt_img - bg) > 5.0
+    if mask.sum() < 4:
+        return False
+
+    rows, cols = np.where(mask)
+    cy = float(rows.mean())
+    cx = float(cols.mean())
+    radius = float(np.max(np.sqrt((rows - cy) ** 2 + (cols - cx) ** 2))) + margin_px
+
+    circ = Circle(
+        (cx, cy), radius,
+        fill=False,
+        edgecolor=edgecolor,
+        linewidth=linewidth,
+        linestyle=linestyle,
+        zorder=5,
+    )
+    ax.add_patch(circ)
+    return True
 
 
 def _draw_qualitative_row(images, col_labels, save_path: Path,
@@ -1747,6 +1797,9 @@ def figure_J7() -> None:
                     "Staged\nJoint", "L2", "L1"],
         save_path=_FIG_DIR / "5.4_realdata_grid.svg",
         annotate_mae_cnr=p_has_gt,
+        # First-cell visual cue: dotted circle around the inclusion on GT/I
+        # so the reader sees what "inclusion" means in the panel. One cell only.
+        highlight_cell=(0, 0, 0),
     )
 
     # ── BreastSet qualitative — Req 2: no GT row, one sample, no metrics ──
