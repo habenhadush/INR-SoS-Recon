@@ -523,7 +523,7 @@ def _draw_recon_grid(
             bottom=0.04,
         )
         if dataset_title:
-            fig.suptitle(dataset_title, fontsize=10, fontweight="bold", y=0.98)
+            fig.suptitle(dataset_title, fontsize=12, fontweight="bold", y=0.98)
 
         for row_idx, (row_label, images) in enumerate(row_specs):
             for col_idx, img in enumerate(images):
@@ -539,13 +539,13 @@ def _draw_recon_grid(
 
                 # Column headers on the first row only
                 if row_idx == 0:
-                    ax.set_title(col_labels[col_idx], fontsize=8, pad=3)
+                    ax.set_title(col_labels[col_idx], fontsize=11, pad=3)
 
                 # Row label on the leftmost cell
                 if col_idx == 0:
                     ax.set_ylabel(
-                        row_label, fontsize=9, rotation=0,
-                        labelpad=20, va="center",
+                        row_label, fontsize=11, rotation=0,
+                        labelpad=24, va="center",
                     )
 
                 # Per-cell annotation (skip GT row, skip if no GT provided)
@@ -555,7 +555,7 @@ def _draw_recon_grid(
                     p.annotate_cell(
                         ax,
                         f"MAE: {mae:.1f}\nCNR: {cnr:.2f}",
-                        fontsize=5,
+                        fontsize=8,
                     )
 
         # Shared colorbar spanning all rows
@@ -563,8 +563,8 @@ def _draw_recon_grid(
         sm = plt.cm.ScalarMappable(cmap=cmap, norm=shared_norm)
         sm.set_array([])
         cb = fig.colorbar(sm, cax=cb_ax)
-        cb.set_label("SoS (m/s)", fontsize=8, labelpad=4)
-        cb.ax.tick_params(labelsize=7)
+        cb.set_label("SoS (m/s)", fontsize=11, labelpad=6)
+        cb.ax.tick_params(labelsize=10)
 
         p.save(fig, save_path, png_fallback=False)
         plt.close(fig)
@@ -657,14 +657,14 @@ def _draw_combined_dataset_grid(
                     for sp in ax.spines.values():
                         sp.set_linewidth(0.4)
                     if r == 0:
-                        ax.set_title(col_labels[c], fontsize=7, pad=2)
+                        ax.set_title(col_labels[c], fontsize=11, pad=2)
                     if c == 0 and pi == 0:
-                        ax.set_ylabel(row_labels[r], fontsize=8, rotation=0,
-                                      labelpad=20, va="center")
+                        ax.set_ylabel(row_labels[r], fontsize=11, rotation=0,
+                                      labelpad=24, va="center")
                     if annotate_mae_cnr and r > 0 and c < len(gt_imgs):
                         mae, cnr = _mae_cnr(img, gt_imgs[c])
                         p.annotate_cell(
-                            ax, f"MAE: {mae:.1f}\nCNR: {cnr:.2f}", fontsize=5,
+                            ax, f"MAE: {mae:.1f}\nCNR: {cnr:.2f}", fontsize=8,
                         )
                     if (highlight_cell is not None
                             and highlight_cell == (pi, r, c)
@@ -701,8 +701,8 @@ def _draw_combined_dataset_grid(
         sm = plt.cm.ScalarMappable(cmap=cmap, norm=shared_norm)
         sm.set_array([])
         cb = fig.colorbar(sm, cax=cb_ax)
-        cb.set_label("SoS (m/s)", fontsize=8, labelpad=4)
-        cb.ax.tick_params(labelsize=7)
+        cb.set_label("SoS (m/s)", fontsize=11, labelpad=6)
+        cb.ax.tick_params(labelsize=10)
 
         p.save(fig, save_path, png_fallback=False)
         plt.close(fig)
@@ -807,16 +807,16 @@ def _draw_combined_metrics(
                            linewidth=0.8, alpha=0.55)
 
                 ax.set_xticks(list(x_geom) + list(x_blob))
-                ax.set_xticklabels(short_labels * 2, fontsize=6.5)
+                ax.set_xticklabels(short_labels * 2, fontsize=10)
             else:
                 ax.set_xticks(list(x_geom))
-                ax.set_xticklabels(short_labels, fontsize=6.5)
+                ax.set_xticklabels(short_labels, fontsize=10)
 
-            ax.set_title(metric_titles.get(mk, mk), fontsize=9, pad=14)
+            ax.set_title(metric_titles.get(mk, mk), fontsize=11, pad=14)
             ax.spines["top"].set_visible(False)
             ax.spines["right"].set_visible(False)
             ax.tick_params(which="both", direction="in", width=0.5,
-                           labelsize=6.5)
+                           labelsize=10)
             ax.grid(axis="y", linewidth=0.4, linestyle="--", alpha=0.5,
                     zorder=0)
 
@@ -829,7 +829,7 @@ def _draw_combined_metrics(
                 ax.set_xlim(xmin, xmax)
                 ax.text((mid_g - xmin) / (xmax - xmin), 1.02, group_labels[0],
                         transform=ax.transAxes, ha="center", va="bottom",
-                        fontsize=8, fontweight="bold")
+                        fontsize=11, fontweight="bold")
             else:
                 mid_b = (x_blob[0] + x_blob[-1]) / 2
                 xmin = x_geom[0] - 0.6
@@ -837,10 +837,10 @@ def _draw_combined_metrics(
                 ax.set_xlim(xmin, xmax)
                 ax.text((mid_g - xmin) / (xmax - xmin), 1.02, group_labels[0],
                         transform=ax.transAxes, ha="center", va="bottom",
-                        fontsize=8, fontweight="bold")
+                        fontsize=11, fontweight="bold")
                 ax.text((mid_b - xmin) / (xmax - xmin), 1.02, group_labels[1],
                         transform=ax.transAxes, ha="center", va="bottom",
-                        fontsize=8, fontweight="bold")
+                        fontsize=11, fontweight="bold")
 
         fig.tight_layout(pad=0.6)
         p.save(fig, save_path, png_fallback=False)
@@ -921,10 +921,10 @@ def _draw_qualitative_row(images, col_labels, save_path: Path,
             ax.set_xticks([]); ax.set_yticks([])
             for sp in ax.spines.values():
                 sp.set_linewidth(0.4)
-            ax.set_title(lbl, fontsize=8, pad=3)
+            ax.set_title(lbl, fontsize=11, pad=4)
 
         if title:
-            fig.suptitle(title, fontsize=11, fontweight="bold", y=0.995)
+            fig.suptitle(title, fontsize=12, fontweight="bold", y=0.995)
 
         fig.subplots_adjust(left=0.02, right=0.88,
                             top=0.78 if title else 0.85,
@@ -936,8 +936,8 @@ def _draw_qualitative_row(images, col_labels, save_path: Path,
             sm = plt.cm.ScalarMappable(cmap=cmap, norm=norm)
             sm.set_array([])
             cb = fig.colorbar(sm, cax=cb_ax)
-            cb.set_label("SoS (m/s)", fontsize=8, labelpad=4)
-            cb.ax.tick_params(labelsize=7)
+            cb.set_label("SoS (m/s)", fontsize=11, labelpad=6)
+            cb.ax.tick_params(labelsize=10)
 
         p.save(fig, save_path, png_fallback=False)
         plt.close(fig)
@@ -1568,7 +1568,7 @@ def figure_J6() -> None:
             )
             ax.annotate(
                 rp["label"], xy=(rp["MAE"], rp["CNR"]),
-                fontsize=7, color="dimgrey",
+                fontsize=10, color="dimgrey",
                 xytext=(5, 5), textcoords="offset points",
             )
 
@@ -1625,10 +1625,10 @@ def figure_J6() -> None:
                 xy=(mx, my),
                 xytext=(mx + dx, my + dy),
                 textcoords="data",
-                fontsize=9, fontweight="bold",
+                fontsize=11, fontweight="bold",
                 ha="center", va="center",
                 color="black",
-                bbox=dict(boxstyle="round,pad=0.18", fc="white",
+                bbox=dict(boxstyle="round,pad=0.22", fc="white",
                           ec="black", lw=0.4, alpha=0.85),
                 arrowprops=dict(arrowstyle="-", linewidth=0.5,
                                 color="black", alpha=0.55,
@@ -1660,20 +1660,20 @@ def figure_J6() -> None:
         ]
         ax.legend(
             handles=legend_handles,
-            fontsize=8, frameon=False,
+            fontsize=11, frameon=False,
             loc="upper left", bbox_to_anchor=(1.02, 1.0),
             borderaxespad=0.0,
             handlelength=1.2, handletextpad=0.5,
             labelspacing=1.0,
         )
 
-        ax.set_xlabel("Mean MAE (m/s)", fontsize=10)
-        ax.set_ylabel("Mean CNR", fontsize=10)
+        ax.set_xlabel("Mean MAE (m/s)", fontsize=11)
+        ax.set_ylabel("Mean CNR", fontsize=11)
         ax.set_title("MAE vs CNR — ranking strategy comparison",
-                     fontsize=10, pad=6)
+                     fontsize=12, pad=8)
         ax.spines["top"].set_visible(False)
         ax.spines["right"].set_visible(False)
-        ax.tick_params(labelsize=9, direction="in")
+        ax.tick_params(labelsize=11, direction="in")
         fig.subplots_adjust(right=0.70, left=0.10,
                             top=0.93, bottom=0.10)
 

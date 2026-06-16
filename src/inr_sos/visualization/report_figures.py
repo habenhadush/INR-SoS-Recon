@@ -65,11 +65,13 @@ _GRID     = (64, 64)
 _SERIF_RCPARAMS: dict = {
     "font.family":        "serif",
     "mathtext.fontset":   "dejavuserif",
-    "axes.titlesize":     10,
-    "axes.labelsize":     9,
-    "xtick.labelsize":    8,
-    "ytick.labelsize":    8,
-    "legend.fontsize":    8,
+    "font.size":          11,   # body-text size (thesis is 11 pt)
+    "axes.titlesize":     11,
+    "axes.labelsize":     11,
+    "xtick.labelsize":    11,
+    "ytick.labelsize":    11,
+    "legend.fontsize":    11,
+    "figure.titlesize":   12,
     "figure.dpi":         300,
     "savefig.dpi":        300,
     "savefig.bbox":       "tight",
