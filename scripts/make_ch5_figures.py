@@ -1797,9 +1797,11 @@ def figure_J7() -> None:
                     "Staged\nJoint", "L2", "L1"],
         save_path=_FIG_DIR / "5.4_realdata_grid.svg",
         annotate_mae_cnr=p_has_gt,
-        # First-cell visual cue: dotted circle around the inclusion on GT/I
-        # so the reader sees what "inclusion" means in the panel. One cell only.
-        highlight_cell=(0, 0, 0),
+        # First-cell visual cue: dotted circle around the inclusion on the
+        # Standalone-INR reconstruction at column I (panel 0, row 1, col 0),
+        # so the reader sees where the inclusion sits in the recovered image.
+        # Mask is derived from that column's GT.
+        highlight_cell=(0, 1, 0),
     )
 
     # ── BreastSet qualitative — Req 2: no GT row, one sample, no metrics ──
