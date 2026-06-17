@@ -868,33 +868,43 @@ def _overlay_inclusion_outline(
     *,
     edgecolor: str = "#ffd60a",   # high-visibility gold; reads clearly on RdBu_r
     linewidth: float = 1.3,
-    linestyle: str = "dotted",
+    linestyle=(0, (1.5, 1.5)),    # dotted
     threshold: float = 5.0,
+    margin_px: float = 2.0,
 ) -> bool:
-    """Trace the inclusion boundary on a single axes as a dotted polygon.
+    """Draw a dotted circle around the inclusion on a single axes.
 
     The inclusion mask uses the same |img - median(img)| > ``threshold`` rule
-    as the CNR metric (`_mae_cnr`); the boundary is drawn as a contour line
-    of that mask, which follows the inclusion shape (not a bounding circle).
+    as the CNR metric (`_mae_cnr`); the circle is the bounding circle of that
+    mask (centroid + max-radius + ``margin_px`` padding), which guarantees it
+    covers every inclusion pixel and reads as a clean shape at thesis scale.
     Returns ``True`` on success, ``False`` if no inclusion was detectable.
 
     The reference image (``img``) is typically the column's GT, but for the
     breast qualitative figure — which has no valid GT — the reconstruction
-    itself is passed in. The boundary is then drawn around whichever region
+    itself is passed in. The circle is then placed around whichever region
     that reconstruction sets apart from its own median.
     """
+    from matplotlib.patches import Circle
+
     bg = float(np.median(img))
     mask = np.abs(img - bg) > threshold
     if mask.sum() < 4:
         return False
-    ax.contour(
-        mask.astype(float),
-        levels=[0.5],
-        colors=[edgecolor],
-        linewidths=linewidth,
-        linestyles=[linestyle],
+
+    rows, cols = np.where(mask)
+    cy = float(rows.mean())
+    cx = float(cols.mean())
+    radius = float(np.max(np.sqrt((rows - cy) ** 2 + (cols - cx) ** 2))) + margin_px
+
+    ax.add_patch(Circle(
+        (cx, cy), radius,
+        fill=False,
+        edgecolor=edgecolor,
+        linewidth=linewidth,
+        linestyle=linestyle,
         zorder=5,
-    )
+    ))
     return True
 
 
