@@ -872,6 +872,8 @@ def _overlay_inclusion_outline(
     threshold: float = 5.0,
     fallback_percentile: float = 95.0,
     margin_px: float = 2.0,
+    forced_center: tuple[float, float] | None = None,
+    forced_radius: float | None = None,
 ) -> bool:
     """Draw a dotted circle around the inclusion on a single axes.
 
@@ -891,19 +893,24 @@ def _overlay_inclusion_outline(
     """
     from matplotlib.patches import Circle
 
-    bg = float(np.median(img))
-    deviation = np.abs(img - bg)
-    mask = deviation > threshold
-    if mask.sum() < 4:
-        cutoff = float(np.percentile(deviation, fallback_percentile))
-        mask = deviation >= cutoff
+    if forced_center is not None and forced_radius is not None:
+        # Brute-force placement (used for the breast figure, where the recon
+        # is too smooth for any threshold/percentile rule to find the inclusion).
+        cx, cy = float(forced_center[0]), float(forced_center[1])
+        radius = float(forced_radius)
+    else:
+        bg = float(np.median(img))
+        deviation = np.abs(img - bg)
+        mask = deviation > threshold
         if mask.sum() < 4:
-            return False
-
-    rows, cols = np.where(mask)
-    cy = float(rows.mean())
-    cx = float(cols.mean())
-    radius = float(np.max(np.sqrt((rows - cy) ** 2 + (cols - cx) ** 2))) + margin_px
+            cutoff = float(np.percentile(deviation, fallback_percentile))
+            mask = deviation >= cutoff
+            if mask.sum() < 4:
+                return False
+        rows, cols = np.where(mask)
+        cy = float(rows.mean())
+        cx = float(cols.mean())
+        radius = float(np.max(np.sqrt((rows - cy) ** 2 + (cols - cx) ** 2))) + margin_px
 
     ax.add_patch(Circle(
         (cx, cy), radius,
@@ -918,7 +925,9 @@ def _overlay_inclusion_outline(
 
 def _draw_qualitative_row(images, col_labels, save_path: Path,
                           title: str = "", cmap: str = "RdBu_r",
-                          highlight_idx: int | None = None) -> None:
+                          highlight_idx: int | None = None,
+                          highlight_center: tuple[float, float] | None = None,
+                          highlight_radius: float | None = None) -> None:
     """1-row × N-col qualitative grid for a single sample across methods.
 
     No GT, no per-cell metric annotation. Used by §5.4 for the breast sample
@@ -950,7 +959,11 @@ def _draw_qualitative_row(images, col_labels, save_path: Path,
                 sp.set_linewidth(0.4)
             ax.set_title(lbl, fontsize=8, pad=3)
             if highlight_idx is not None and col == highlight_idx:
-                _overlay_inclusion_outline(ax, img)
+                _overlay_inclusion_outline(
+                    ax, img,
+                    forced_center=highlight_center,
+                    forced_radius=highlight_radius,
+                )
 
         if title:
             fig.suptitle(title, fontsize=11, fontweight="bold", y=0.995)
@@ -1876,11 +1889,17 @@ def figure_J7() -> None:
             (i for i, lbl in enumerate(breast_lbls) if lbl == "Staged Joint"),
             None,
         )
+        # Fig 5.17: brute-force-placed dotted circle on the Staged-Joint cell.
+        # Center horizontal: image middle (col ~32 for 64×64).
+        # Center vertical:   a little up from the bottom (row ~42 for 64×64).
+        # Radius:            ~half the distance from the center to the top.
         _draw_qualitative_row(
             breast_imgs, breast_lbls,
             save_path=_FIG_DIR / "5.4_realdata_breast.svg",
             title="BreastSet",
             highlight_idx=sj_col,
+            highlight_center=(32.0, 42.0),
+            highlight_radius=20.0,
         )
     else:
         print("  [J7/BreastSet] no reconstructions available; skipping qualitative figure.")
