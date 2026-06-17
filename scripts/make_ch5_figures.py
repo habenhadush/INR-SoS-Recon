@@ -584,7 +584,7 @@ def _draw_combined_dataset_grid(
     figwidth: float = 11.0,
     cmap: str = "RdBu_r",
     annotate_mae_cnr: bool = True,
-    highlight_cell: tuple[int, int, int] | None = None,
+    highlight_cells: list[tuple[int, int, int]] | tuple[int, int, int] | None = None,
 ) -> None:
     """One reconstruction grid with multiple column-groups SIDE-BY-SIDE.
 
@@ -596,12 +596,22 @@ def _draw_combined_dataset_grid(
         rows_imgs[r] is the list of images for row r in this panel; row 0 is
         treated as GT (used for shared diverging norm + MAE/CNR baseline).
     row_labels: ["GT", "Standalone", ...]  (must equal len(rows_imgs))
-    highlight_cell: ``(panel_idx, row_idx, col_idx)`` — optional. Draws a
-        dotted circle around the inclusion in this single cell to teach the
-        reader what "inclusion" refers to. The inclusion mask is derived
-        from the GT for that column; the circle is the same regardless of
-        which row is highlighted.
+    highlight_cells: ``(panel_idx, row_idx, col_idx)`` or a list of such
+        tuples — optional. Draws a dotted circle around the inclusion on
+        every listed cell to teach the reader what "inclusion" refers to.
+        The inclusion mask is derived from the GT for that column; the
+        circle is the same regardless of which row is highlighted.
     """
+    # Normalise highlight_cells to a list of (panel, row, col) tuples.
+    if highlight_cells is None:
+        highlight_list: list[tuple[int, int, int]] = []
+    elif (isinstance(highlight_cells, tuple)
+          and len(highlight_cells) == 3
+          and all(isinstance(v, int) for v in highlight_cells)):
+        highlight_list = [highlight_cells]
+    else:
+        highlight_list = list(highlight_cells)
+    highlight_set = set(highlight_list)
     from matplotlib.lines import Line2D
 
     p = _get_p()
@@ -666,9 +676,7 @@ def _draw_combined_dataset_grid(
                         p.annotate_cell(
                             ax, f"MAE: {mae:.1f}\nCNR: {cnr:.2f}", fontsize=5,
                         )
-                    if (highlight_cell is not None
-                            and highlight_cell == (pi, r, c)
-                            and c < len(gt_imgs)):
+                    if (pi, r, c) in highlight_set and c < len(gt_imgs):
                         _overlay_inclusion_circle(ax, gt_imgs[c])
 
         # Panel header titles, centred above each group
@@ -895,12 +903,17 @@ def _overlay_inclusion_circle(
 
 
 def _draw_qualitative_row(images, col_labels, save_path: Path,
-                          title: str = "", cmap: str = "RdBu_r") -> None:
+                          title: str = "", cmap: str = "RdBu_r",
+                          highlight_idx: int | None = None) -> None:
     """1-row × N-col qualitative grid for a single sample across methods.
 
     No GT, no per-cell metric annotation. Used by §5.4 for the breast sample
     where there is no valid in-vivo ground truth and only a qualitative
     comparison across reconstruction methods is meaningful.
+
+    ``highlight_idx`` (optional): column index to overlay with a dotted
+    inclusion circle. Since there is no GT, the inclusion mask is derived
+    from that column's own reconstruction (``images[highlight_idx]``).
     """
     p = _get_p()
     n = len(images)
@@ -915,13 +928,15 @@ def _draw_qualitative_row(images, col_labels, save_path: Path,
         axes = axes[0]
         fig.patch.set_facecolor("white")
 
-        for ax, img, lbl in zip(axes, images, col_labels):
+        for col, (ax, img, lbl) in enumerate(zip(axes, images, col_labels)):
             ax.imshow(img, cmap=cmap, norm=norm,
                       interpolation="nearest", origin="upper")
             ax.set_xticks([]); ax.set_yticks([])
             for sp in ax.spines.values():
                 sp.set_linewidth(0.4)
             ax.set_title(lbl, fontsize=8, pad=3)
+            if highlight_idx is not None and col == highlight_idx:
+                _overlay_inclusion_circle(ax, img)
 
         if title:
             fig.suptitle(title, fontsize=11, fontweight="bold", y=0.995)
@@ -1462,6 +1477,9 @@ def figure_J6() -> None:
             panels,
             row_labels=["GT", "Flat\nwinner", "Inclusion\naware", "L2", "L1"],
             save_path=_FIG_DIR / "5.3_ranking_grid.svg",
+            # Fig 5.13: dotted inclusion circle on the Inclusion-aware row,
+            # column I of GeomSet and column I of BlobSet.
+            highlight_cells=[(0, 2, 0), (1, 2, 0)],
         )
 
     # The scatter still consumes all 5 objectives × 2 datasets; build a small
@@ -1797,11 +1815,9 @@ def figure_J7() -> None:
                     "Staged\nJoint", "L2", "L1"],
         save_path=_FIG_DIR / "5.4_realdata_grid.svg",
         annotate_mae_cnr=p_has_gt,
-        # First-cell visual cue: dotted circle around the inclusion on the
-        # Standalone-INR reconstruction at column I (panel 0, row 1, col 0),
-        # so the reader sees where the inclusion sits in the recovered image.
-        # Mask is derived from that column's GT.
-        highlight_cell=(0, 1, 0),
+        # Fig 5.15: dotted inclusion circle on the Staged-Joint reconstruction
+        # at column I (panel 0, row 3, col 0). Mask derived from that column's GT.
+        highlight_cells=[(0, 3, 0)],
     )
 
     # ── BreastSet qualitative — Req 2: no GT row, one sample, no metrics ──
@@ -1836,10 +1852,18 @@ def figure_J7() -> None:
             breast_lbls.append(baseline)
 
     if breast_imgs:
+        # Fig 5.17: dotted inclusion circle on the Staged-Joint column of the
+        # qualitative breast figure. With no GT the mask is derived from the
+        # reconstruction shown in that column.
+        sj_col = next(
+            (i for i, lbl in enumerate(breast_lbls) if lbl == "Staged Joint"),
+            None,
+        )
         _draw_qualitative_row(
             breast_imgs, breast_lbls,
             save_path=_FIG_DIR / "5.4_realdata_breast.svg",
             title="BreastSet",
+            highlight_idx=sj_col,
         )
     else:
         print("  [J7/BreastSet] no reconstructions available; skipping qualitative figure.")
