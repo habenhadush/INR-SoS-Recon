@@ -870,15 +870,19 @@ def _overlay_inclusion_outline(
     linewidth: float = 1.3,
     linestyle=(0, (1.5, 1.5)),    # dotted
     threshold: float = 5.0,
+    fallback_percentile: float = 95.0,
     margin_px: float = 2.0,
 ) -> bool:
     """Draw a dotted circle around the inclusion on a single axes.
 
-    The inclusion mask uses the same |img - median(img)| > ``threshold`` rule
-    as the CNR metric (`_mae_cnr`); the circle is the bounding circle of that
-    mask (centroid + max-radius + ``margin_px`` padding), which guarantees it
-    covers every inclusion pixel and reads as a clean shape at thesis scale.
-    Returns ``True`` on success, ``False`` if no inclusion was detectable.
+    Primary inclusion mask uses the same |img - median(img)| > ``threshold``
+    rule as the CNR metric (`_mae_cnr`). When that produces too few pixels
+    (smooth reconstructions, e.g. the staged-joint breast result), the rule
+    is relaxed to the top ``100 - fallback_percentile`` percent most-deviant
+    pixels, so a meaningful region is always identified. The circle is then
+    the bounding circle of that mask (centroid + max-radius + ``margin_px``
+    padding), which guarantees it covers every inclusion pixel and reads as
+    a clean shape at thesis scale. Returns ``True`` on success.
 
     The reference image (``img``) is typically the column's GT, but for the
     breast qualitative figure — which has no valid GT — the reconstruction
@@ -888,9 +892,13 @@ def _overlay_inclusion_outline(
     from matplotlib.patches import Circle
 
     bg = float(np.median(img))
-    mask = np.abs(img - bg) > threshold
+    deviation = np.abs(img - bg)
+    mask = deviation > threshold
     if mask.sum() < 4:
-        return False
+        cutoff = float(np.percentile(deviation, fallback_percentile))
+        mask = deviation >= cutoff
+        if mask.sum() < 4:
+            return False
 
     rows, cols = np.where(mask)
     cy = float(rows.mean())
