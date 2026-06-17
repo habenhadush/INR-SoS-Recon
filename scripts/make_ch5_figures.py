@@ -677,7 +677,7 @@ def _draw_combined_dataset_grid(
                             ax, f"MAE: {mae:.1f}\nCNR: {cnr:.2f}", fontsize=5,
                         )
                     if (pi, r, c) in highlight_set and c < len(gt_imgs):
-                        _overlay_inclusion_circle(ax, gt_imgs[c])
+                        _overlay_inclusion_outline(ax, gt_imgs[c])
 
         # Panel header titles, centred above each group
         for pi, (title, _, _) in enumerate(panels):
@@ -862,43 +862,39 @@ def _col_indices(n_total: int, n_want: int) -> list[int]:
     return np.linspace(0, n_total - 1, n, dtype=int).tolist()
 
 
-def _overlay_inclusion_circle(
+def _overlay_inclusion_outline(
     ax,
-    gt_img: np.ndarray,
+    img: np.ndarray,
     *,
     edgecolor: str = "#ffd60a",   # high-visibility gold; reads clearly on RdBu_r
     linewidth: float = 1.3,
-    linestyle=(0, (1.5, 1.5)),    # dotted
-    margin_px: float = 1.5,
+    linestyle: str = "dotted",
+    threshold: float = 5.0,
 ) -> bool:
-    """Draw a dotted circle around the inclusion on a single axes.
+    """Trace the inclusion boundary on a single axes as a dotted polygon.
 
-    Inclusion mask uses the same |gt - median(gt)| > 5 m/s rule as the CNR
-    metric (`_mae_cnr`); the circle is the bounding circle of that mask
-    (centroid + max-radius + ``margin_px`` padding). Returns ``True`` on
-    success, ``False`` if no inclusion was detectable.
+    The inclusion mask uses the same |img - median(img)| > ``threshold`` rule
+    as the CNR metric (`_mae_cnr`); the boundary is drawn as a contour line
+    of that mask, which follows the inclusion shape (not a bounding circle).
+    Returns ``True`` on success, ``False`` if no inclusion was detectable.
+
+    The reference image (``img``) is typically the column's GT, but for the
+    breast qualitative figure — which has no valid GT — the reconstruction
+    itself is passed in. The boundary is then drawn around whichever region
+    that reconstruction sets apart from its own median.
     """
-    from matplotlib.patches import Circle
-
-    bg = float(np.median(gt_img))
-    mask = np.abs(gt_img - bg) > 5.0
+    bg = float(np.median(img))
+    mask = np.abs(img - bg) > threshold
     if mask.sum() < 4:
         return False
-
-    rows, cols = np.where(mask)
-    cy = float(rows.mean())
-    cx = float(cols.mean())
-    radius = float(np.max(np.sqrt((rows - cy) ** 2 + (cols - cx) ** 2))) + margin_px
-
-    circ = Circle(
-        (cx, cy), radius,
-        fill=False,
-        edgecolor=edgecolor,
-        linewidth=linewidth,
-        linestyle=linestyle,
+    ax.contour(
+        mask.astype(float),
+        levels=[0.5],
+        colors=[edgecolor],
+        linewidths=linewidth,
+        linestyles=[linestyle],
         zorder=5,
     )
-    ax.add_patch(circ)
     return True
 
 
@@ -936,7 +932,7 @@ def _draw_qualitative_row(images, col_labels, save_path: Path,
                 sp.set_linewidth(0.4)
             ax.set_title(lbl, fontsize=8, pad=3)
             if highlight_idx is not None and col == highlight_idx:
-                _overlay_inclusion_circle(ax, img)
+                _overlay_inclusion_outline(ax, img)
 
         if title:
             fig.suptitle(title, fontsize=11, fontweight="bold", y=0.995)
@@ -1381,6 +1377,9 @@ def figure_J5b() -> None:
         panels,
         row_labels=["GT", "Standalone", "Staged\nJoint", "L2", "L1"],
         save_path=_FIG_DIR / "5.3_staged_grid.svg",
+        # Fig 5.12: dotted inclusion outline on the Staged-Joint row,
+        # GeomSet sample III (col 2) and BlobSet sample IV (col 3).
+        highlight_cells=[(0, 2, 2), (1, 2, 3)],
     )
     print("  [J5b] done.")
 
@@ -1477,9 +1476,9 @@ def figure_J6() -> None:
             panels,
             row_labels=["GT", "Flat\nwinner", "Inclusion\naware", "L2", "L1"],
             save_path=_FIG_DIR / "5.3_ranking_grid.svg",
-            # Fig 5.13: dotted inclusion circle on the Inclusion-aware row,
-            # column I of GeomSet and column I of BlobSet.
-            highlight_cells=[(0, 2, 0), (1, 2, 0)],
+            # Fig 5.13: dotted inclusion outline on the Inclusion-aware row,
+            # GeomSet sample III (col 2) and BlobSet sample IV (col 3).
+            highlight_cells=[(0, 2, 2), (1, 2, 3)],
         )
 
     # The scatter still consumes all 5 objectives × 2 datasets; build a small
