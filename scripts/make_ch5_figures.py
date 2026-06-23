@@ -923,6 +923,149 @@ def _overlay_inclusion_outline(
     return True
 
 
+def _cnr_from_delineation(
+    recon_img: np.ndarray,
+    deli_img: np.ndarray,
+    *,
+    incl_threshold: float = 5.0,
+    bg_threshold: float = 2.0,
+) -> tuple[float, np.ndarray, np.ndarray]:
+    """Compute CNR of a reconstruction against a delineation map (no GT).
+
+    Same masking rule as ``_mae_cnr``: inclusion ROI = pixels of the
+    delineation deviating from the delineation median by more than
+    ``incl_threshold`` m/s; background ROI = pixels within ``bg_threshold``
+    m/s of that median. CNR is then ``|μ_incl − μ_bg| / σ_bg`` evaluated on
+    the reconstruction. Returns ``(cnr, roi_mask, bg_mask)``; cnr is NaN
+    when either mask is too small.
+    """
+    bg_med = float(np.median(deli_img))
+    roi_mask = np.abs(deli_img - bg_med) > incl_threshold
+    bg_mask  = np.abs(deli_img - bg_med) < bg_threshold
+    if roi_mask.sum() < 4 or bg_mask.sum() < 4:
+        return float("nan"), roi_mask, bg_mask
+    roi_mean = float(np.mean(recon_img[roi_mask]))
+    bg_mean  = float(np.mean(recon_img[bg_mask]))
+    bg_std   = float(np.std(recon_img[bg_mask]))
+    cnr = abs(roi_mean - bg_mean) / (bg_std + 1e-8)
+    return cnr, roi_mask, bg_mask
+
+
+def _draw_breast_two_delineations(
+    recon_by_method: dict[str, np.ndarray],
+    label_order: list[str],
+    deli_imgs: list[np.ndarray],
+    save_path: Path,
+    *,
+    title: str = "BreastSet",
+    cmap: str = "RdBu_r",
+    incl_threshold: float = 5.0,
+    bg_threshold: float = 2.0,
+) -> dict[tuple[int, str], float]:
+    """2-row breast figure — one row per supplied delineation.
+
+    Layout (one row per delineation):
+      | Delineation map | <method 1> | <method 2> | ... | <method N> |
+
+    Each method cell shows the same physical reconstruction across both rows
+    (the breast file contains a single in-vivo image stored in two slots);
+    only the dotted ROI contour and the annotated CNR change between rows,
+    matching the delineation that defines the row. Returns the 10-value CNR
+    table keyed by ``(delineation_idx, method_label)`` for the §5.4.2 table.
+    """
+    p = _get_p()
+    n_methods = len(label_order)
+    n_cols = 1 + n_methods
+    n_rows = len(deli_imgs)
+
+    all_imgs = list(deli_imgs) + [recon_by_method[l] for l in label_order]
+    shared_norm = _shared_norm(all_imgs) if all_imgs else None
+
+    cell_w = 1.8
+    fig_w = cell_w * n_cols + 1.0
+    fig_h = cell_w * n_rows + 0.9
+
+    cnr_table: dict[tuple[int, str], float] = {}
+
+    with matplotlib.rc_context(p.SERIF_RCPARAMS):
+        fig, axes = plt.subplots(n_rows, n_cols,
+                                 figsize=(fig_w, fig_h),
+                                 squeeze=False)
+        fig.patch.set_facecolor("white")
+
+        for ri, deli in enumerate(deli_imgs):
+            # Masks come from the delineation; CNR is then evaluated on each
+            # reconstruction against those masks.
+            _, roi_mask, _ = _cnr_from_delineation(
+                deli, deli,
+                incl_threshold=incl_threshold,
+                bg_threshold=bg_threshold,
+            )
+
+            # Column 0: the delineation map itself, with its own inclusion
+            # contour for orientation.
+            ax = axes[ri, 0]
+            ax.imshow(deli, cmap=cmap, norm=shared_norm,
+                      interpolation="nearest", origin="upper")
+            ax.set_xticks([]); ax.set_yticks([])
+            for sp in ax.spines.values():
+                sp.set_linewidth(0.4)
+            if ri == 0:
+                ax.set_title("Delineation", fontsize=8, pad=3)
+            ax.set_ylabel(f"Deli. {chr(ord('A') + ri)}", fontsize=8,
+                          rotation=0, labelpad=22, va="center")
+            if roi_mask.sum() >= 4:
+                ax.contour(roi_mask.astype(float), levels=[0.5],
+                           colors=["#ffd60a"], linewidths=1.0,
+                           linestyles=["dotted"])
+
+            # Method columns
+            for ci, lbl in enumerate(label_order, start=1):
+                ax = axes[ri, ci]
+                rec = recon_by_method[lbl]
+                ax.imshow(rec, cmap=cmap, norm=shared_norm,
+                          interpolation="nearest", origin="upper")
+                ax.set_xticks([]); ax.set_yticks([])
+                for sp in ax.spines.values():
+                    sp.set_linewidth(0.4)
+                if ri == 0:
+                    ax.set_title(lbl, fontsize=8, pad=3)
+                # ROI contour overlay
+                if roi_mask.sum() >= 4:
+                    ax.contour(roi_mask.astype(float), levels=[0.5],
+                               colors=["#ffd60a"], linewidths=1.0,
+                               linestyles=["dotted"])
+                # CNR against this delineation
+                cnr, _, _ = _cnr_from_delineation(
+                    rec, deli,
+                    incl_threshold=incl_threshold,
+                    bg_threshold=bg_threshold,
+                )
+                cnr_table[(ri, lbl)] = cnr
+                p.annotate_cell(ax, f"CNR: {cnr:.2f}", fontsize=5)
+
+        if title:
+            fig.suptitle(title, fontsize=11, fontweight="bold", y=0.995)
+
+        fig.subplots_adjust(left=0.05, right=0.88,
+                            top=0.86 if title else 0.94,
+                            bottom=0.04, wspace=0.05, hspace=0.08)
+
+        if shared_norm is not None:
+            cb_ax = fig.add_axes([0.90, 0.06, 0.025, 0.78])
+            sm = plt.cm.ScalarMappable(cmap=cmap, norm=shared_norm)
+            sm.set_array([])
+            cb = fig.colorbar(sm, cax=cb_ax)
+            cb.set_label("SoS (m/s)", fontsize=8, labelpad=4)
+            cb.ax.tick_params(labelsize=7)
+
+        p.save(fig, save_path, png_fallback=False)
+        plt.close(fig)
+
+    print(f"  [breast-c2] saved -> {save_path.with_suffix('.svg')}")
+    return cnr_table
+
+
 def _draw_qualitative_row(images, col_labels, save_path: Path,
                           title: str = "", cmap: str = "RdBu_r",
                           highlight_idx: int | None = None,
@@ -1850,59 +1993,84 @@ def figure_J7() -> None:
         highlight_cells=[(0, 3, 0)],
     )
 
-    # ── BreastSet qualitative — Req 2: no GT row, one sample, no metrics ──
+    # ── BreastSet — C2: one in-vivo image, two delineations ──────────────
+    # The breast .mat stores the SAME physical image in two slots, each slot
+    # carrying a different delineation (background + inclusion regions in
+    # GT-format), supplied by the supervisor for contrast evaluation only.
+    # Pipeline output: identical reconstruction per slot (same measurements);
+    # only the GT/delineation differs, so each method yields two CNRs that
+    # were previously averaged into a single "N=2 breast CNR".
     breast_recon = _load_npz(dirs["ti60qmx3_breast_recon"],    "ti60qmx3_breast_recon")
     breast_dn    = _load_npz(dirs["ti60qmx3_breast_denoised"], "ti60qmx3_breast_denoised")
     breast_jt    = _load_npz(dirs["z7bs7iy5_breast_honest"],   "z7bs7iy5_breast_honest")
 
-    breast_imgs: list[np.ndarray] = []
-    breast_lbls: list[str] = []
-    sample_i = 0   # the two stored breast slots are bit-identical (= 1 sample)
+    def _verify_breast_assumptions(npz, name: str) -> bool:
+        if len(npz["gt"]) < 2:
+            print(f"  [J7/breast-c2] {name}: only {len(npz['gt'])} slot(s); cannot pull two delineations.")
+            return False
+        deli_identical = bool(np.array_equal(npz["gt"][0], npz["gt"][1], equal_nan=True))
+        if deli_identical:
+            print(f"  [J7/breast-c2] WARNING {name}: gt[0] == gt[1] bit-identical — only ONE delineation on disk; the supervisor's second delineation may need to be re-supplied.")
+        for lbl, arr in npz["recons"].items():
+            if len(arr) >= 2 and not np.array_equal(arr[0], arr[1], equal_nan=True):
+                print(f"  [J7/breast-c2] NOTE {name}: recon '{lbl}' differs between slots — recon is NOT identical across the two slots.")
+        return not deli_identical
+
+    deli_ok_r  = _verify_breast_assumptions(breast_recon, "ti60qmx3_breast_recon")
+    deli_ok_dn = _verify_breast_assumptions(breast_dn,    "ti60qmx3_breast_denoised")
+    deli_ok_jt = _verify_breast_assumptions(breast_jt,    "z7bs7iy5_breast_honest")
+    if not (deli_ok_r and deli_ok_dn and deli_ok_jt):
+        print("  [J7/breast-c2] At least one source carries identical delineations; figure may not render two distinct rows.")
+
+    # Pick rank-1 from each method, sample slot 0 (recon is identical across slots).
+    breast_recons: dict[str, np.ndarray] = {}
+    breast_label_order: list[str] = []
     try:
         _, arr_r = _pick_rank(breast_recon["recons"], 1)
-        breast_imgs.append(_to_sos_img(arr_r[sample_i]))
-        breast_lbls.append("Standalone")
+        breast_recons["Standalone"] = _to_sos_img(arr_r[0])
+        breast_label_order.append("Standalone")
     except (KeyError, IndexError):
         pass
     try:
         _, arr_dn = _pick_rank(breast_dn["recons"], 1)
-        breast_imgs.append(_to_sos_img(arr_dn[sample_i]))
-        breast_lbls.append("Meas. Reg.")
+        breast_recons["Meas. Reg."] = _to_sos_img(arr_dn[0])
+        breast_label_order.append("Meas. Reg.")
     except (KeyError, IndexError):
         pass
     try:
         _, arr_jt = _pick_rank(breast_jt["recons"], 1)
-        breast_imgs.append(_to_sos_img(arr_jt[sample_i]))
-        breast_lbls.append("Staged Joint")
+        breast_recons["Staged Joint"] = _to_sos_img(arr_jt[0])
+        breast_label_order.append("Staged Joint")
     except (KeyError, IndexError):
         pass
     for baseline in ("L2", "L1"):
         if baseline in breast_recon["recons"]:
-            breast_imgs.append(_to_sos_img(breast_recon["recons"][baseline][sample_i]))
-            breast_lbls.append(baseline)
+            breast_recons[baseline] = _to_sos_img(breast_recon["recons"][baseline][0])
+            breast_label_order.append(baseline)
 
-    if breast_imgs:
-        # Fig 5.17: dotted inclusion circle on the Staged-Joint column of the
-        # qualitative breast figure. With no GT the mask is derived from the
-        # reconstruction shown in that column.
-        sj_col = next(
-            (i for i, lbl in enumerate(breast_lbls) if lbl == "Staged Joint"),
-            None,
-        )
-        # Fig 5.17: brute-force-placed dotted circle on the Staged-Joint cell.
-        # Center horizontal: image middle (col ~32 for 64×64).
-        # Center vertical:   a little up from the bottom (row ~42 for 64×64).
-        # Radius:            ~half the distance from the center to the top.
-        _draw_qualitative_row(
-            breast_imgs, breast_lbls,
+    deli_imgs = [_to_sos_img(breast_recon["gt"][i])
+                 for i in range(min(2, len(breast_recon["gt"])))]
+
+    if breast_recons and deli_imgs:
+        cnr_table = _draw_breast_two_delineations(
+            breast_recons, breast_label_order, deli_imgs,
             save_path=_FIG_DIR / "5.4_realdata_breast.svg",
             title="BreastSet",
-            highlight_idx=sj_col,
-            highlight_center=(32.0, 42.0),
-            highlight_radius=20.0,
         )
+        # Print the 10-value table for the writer's §5.4.2 table.
+        print("\n  [breast-c2] CNR table — 5 methods × 2 delineations:")
+        header = "method".ljust(18) + " | " + " | ".join(
+            f"Deli {chr(ord('A') + ri)}" for ri in range(len(deli_imgs))
+        )
+        print("    " + header)
+        print("    " + "-" * len(header))
+        for lbl in breast_label_order:
+            cells = " | ".join(
+                f"{cnr_table[(ri, lbl)]:6.3f}" for ri in range(len(deli_imgs))
+            )
+            print(f"    {lbl.ljust(18)} | {cells}")
     else:
-        print("  [J7/BreastSet] no reconstructions available; skipping qualitative figure.")
+        print("  [J7/breast-c2] no reconstructions or delineations available; skipping figure.")
 
     # ── PhantomSet metrics (Req 3: breast panel dropped) ──────────────────
     def _build_metrics(recon_key, dn_key, jt_key):
